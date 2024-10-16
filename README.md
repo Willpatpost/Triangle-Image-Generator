@@ -1,1 +1,1 @@
-Insert the path to your desired image in line 122 and run the program
+Insert the path to your desired image in the relevant lines and run the program
