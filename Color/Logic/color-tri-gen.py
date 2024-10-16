@@ -39,7 +39,7 @@ def display_images(target_image, generated_image, generation, fitness_score):
     plt.show()
 
 # Example usage:
-target_image = load_image(r"path")
+target_image = load_image(r"PATH")
 
 class Triangle:
     def __init__(self, img_width, img_height):
