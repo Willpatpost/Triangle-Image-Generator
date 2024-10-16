@@ -119,5 +119,5 @@ def genetic_algorithm(target_image, num_triangles=500, population_size=1000, gen
     return best_individual
 
 # Example usage
-target_image = load_image(r"C:\Users\Willp\Git\CS 580\Triangles\PATH")
+target_image = load_image(r"PATH")
 best_solution = genetic_algorithm(target_image, population_size=1000, generations=200)
