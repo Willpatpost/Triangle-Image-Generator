@@ -2,7 +2,8 @@ import numpy as np
 from PIL import Image, ImageDraw
 import random
 import matplotlib.pyplot as plt
-from skimage.metrics import structural_similarity as ssim  # Import SSIM for fitness calculation
+from skimage.metrics import structural_similarity as ssim
+import time  # For tracking the time
 
 # Function to load and resize the target image as grayscale
 def load_image(image_path, size=(200, 200)):
@@ -21,7 +22,7 @@ def display_images(target_image, generated_image, fitness_score):
     # Show generated image
     axs[1].imshow(generated_image, cmap='gray')
     axs[1].axis('off')
-    axs[1].set_title(f'Best Generated Image (Fitness: {fitness_score})')
+    axs[1].set_title(f'Best Generated Image (Fitness: {fitness_score:.5f}%)')
 
     plt.show()
 
@@ -71,9 +72,15 @@ def mutate(individual, mutation_rate, img_width, img_height):
 def dynamic_mutation_rate(generation, total_generations, initial_rate=0.05, final_rate=0.01):
     return initial_rate - (generation / total_generations) * (initial_rate - final_rate)
 
+# Time-tracking helper function
+def format_time(start_time):
+    elapsed_time = time.time() - start_time
+    return f"Time taken: {elapsed_time:.2f} seconds"
+
 # Genetic algorithm to evolve a solution
-def genetic_algorithm(target_image, num_triangles=500, population_size=1000, generations=200):
+def genetic_algorithm(target_image, num_triangles=100, population_size=500, generations=300):
     img_width, img_height = target_image.shape[1], target_image.shape[0]
+    start_time = time.time()  # Start the timer
 
     # Initialize the population
     population = [create_individual(num_triangles, img_width, img_height) for _ in range(population_size)]
@@ -90,9 +97,11 @@ def genetic_algorithm(target_image, num_triangles=500, population_size=1000, gen
             best_fitness = fitness_scores[max_fitness_idx]
             best_individual = population[max_fitness_idx]
 
-        # Print the fitness score every 25 generations
+        # Print the fitness score and time every 25 generations
         if generation % 25 == 0:
-            print(f"Generation {generation}, Best Fitness (SSIM): {best_fitness}")
+            fitness_percentage = best_fitness * 100  # Convert to percentage
+            print(f"Generation {generation}, Best Fitness: {fitness_percentage:.5f}%")
+            print(format_time(start_time))
 
         # Dynamic mutation rate
         mutation_rate = dynamic_mutation_rate(generation, generations)
@@ -113,11 +122,13 @@ def genetic_algorithm(target_image, num_triangles=500, population_size=1000, gen
 
     # Final output: show the best solution
     best_image = render_individual(best_individual, img_width, img_height)
-    display_images(target_image, best_image, best_fitness)
-    print(f"Final Generation, Best Fitness (SSIM): {best_fitness}")
+    fitness_percentage = best_fitness * 100  # Convert SSIM score to percentage
+    display_images(target_image, best_image, fitness_percentage)
+    print(f"Final Generation, Best Fitness: {fitness_percentage:.5f}%")
+    print(format_time(start_time))
 
     return best_individual
 
 # Example usage
 target_image = load_image(r"PATH")
-best_solution = genetic_algorithm(target_image, population_size=1000, generations=200)
+best_solution = genetic_algorithm(target_image, population_size=500, generations=300)
