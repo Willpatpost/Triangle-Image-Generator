@@ -5,11 +5,10 @@ import random
 import sys
 import copy
 import time
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import List, Optional
-
-import numpy as np
 from PIL import Image
 from skimage.filters import gaussian
 
@@ -163,54 +162,70 @@ def initialize_logging():
         logging.basicConfig(level=logging.CRITICAL)
     logging.debug("Logging initialized.")
 
-def user_interaction():
-    """Handle user interaction for logging options and image path."""
-    # Logging options
-    print("Choose logging option:")
-    print("a) Default")
-    print("b) Custom")
-    print("c) None")
-    print("d) Cancel program")
-    logging_choice = input("Enter choice (a/b/c/d): ").strip().lower()
+def user_interaction() -> str:
+    """
+    Handle user interaction for logging options and image path selection.
+    
+    Returns:
+        str: Validated image path provided by the user.
+    """
+    while True:
+        # Logging options
+        print("\nChoose logging option:")
+        print("a) Default")
+        print("b) Custom")
+        print("c) None")
+        print("d) Cancel program")
+        logging_choice = input("Enter choice (a/b/c/d): ").strip().lower()
 
-    if logging_choice == 'd':
-        print("Program cancelled.")
-        sys.exit(0)
-    elif logging_choice == 'c':
-        config.enable_logging = False
-    elif logging_choice == 'b':
-        custom_log_level = input("Enter custom logging level (DEBUG/INFO/WARNING/ERROR/CRITICAL): ").strip().upper()
-        if custom_log_level in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]:
-            config.log_level = custom_log_level
+        if logging_choice == 'd':
+            print("Program cancelled.")
+            sys.exit(0)
+        elif logging_choice == 'c':
+            config.enable_logging = False
+            break
+        elif logging_choice == 'b':
+            custom_log_level = input("Enter custom logging level (DEBUG/INFO/WARNING/ERROR/CRITICAL): ").strip().upper()
+            if custom_log_level in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]:
+                config.log_level = custom_log_level
+                config.enable_logging = True
+                break
+            else:
+                print("Invalid logging level. Using default.")
+        elif logging_choice == 'a':
             config.enable_logging = True
+            break
         else:
-            print("Invalid logging level. Using default.")
-    else:
-        config.enable_logging = True
+            print("Invalid choice. Please select a valid option.")
 
     # File name prompt
-    image_path = input("Enter desired target image file name: ").strip()
-    while not os.path.isfile(image_path):
-        print(f"File '{image_path}' not found. Please enter a valid file name.")
-        image_path = input("Enter desired target image file name: ").strip()
+    while True:
+        image_path = input("\nEnter desired target image file name: ").strip()
+        if os.path.isfile(image_path):
+            break
+        else:
+            print(f"File '{image_path}' not found. Please enter a valid file name.")
 
     # Confirmation prompt
-    print(f"The chosen file is '{image_path}'. Are you ready to begin?")
-    print("a) Correct file, begin")
-    print("b) Wrong file, re-enter")
-    print("c) Wrong logging, return to beginning")
-    print("d) Cancel program")
-    confirmation_choice = input("Enter choice (a/b/c/d): ").strip().lower()
+    while True:
+        print(f"\nThe chosen file is '{image_path}'. Are you ready to begin?")
+        print("a) Correct file, begin")
+        print("b) Wrong file, re-enter")
+        print("c) Wrong logging, return to beginning")
+        print("d) Cancel program")
+        confirmation_choice = input("Enter choice (a/b/c/d): ").strip().lower()
 
-    if confirmation_choice == 'd':
-        print("Program cancelled.")
-        sys.exit(0)
-    elif confirmation_choice == 'c':
-        return user_interaction()  # Restart the user interaction
-    elif confirmation_choice == 'b':
-        return user_interaction()  # Restart the user interaction
-
-    return image_path
+        if confirmation_choice == 'd':
+            print("Program cancelled.")
+            sys.exit(0)
+        elif confirmation_choice == 'c':
+            return user_interaction()  # Restart the user interaction
+        elif confirmation_choice == 'b':
+            return user_interaction()  # Restart the user interaction
+        elif confirmation_choice == 'a':
+            return image_path
+        else:
+            print("Invalid choice. Please select a valid option.")
 
 def read_and_process_image(image_path: str, args):
     """Read and process the reference image."""
