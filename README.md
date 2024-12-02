@@ -7,7 +7,7 @@
 
 ## Overview
 
-This project implements a **Genetic Algorithm (GA)** to approximate a given grayscale image using a set of semi-transparent triangles. Inspired by Roger Johansson's blog on evolving the Mona Lisa, the algorithm iteratively evolves a population of triangle-based images to closely resemble the target image. Each individual in the population consists of multiple triangles, and through processes like selection, crossover, and mutation, the GA optimizes the placement, size, grayscale value, and transparency of these triangles to minimize the difference from the target image.
+This project implements a **Genetic Algorithm (GA)** to approximate a given grayscale image using a set of semi-transparent triangles. Each individual in the population consists of multiple triangles, and through processes including selection, crossover, and mutation, the GA optimizes the placement, size, grayscale value, and transparency of these triangles to minimize the difference from the target image.
 
 ## Features
 
