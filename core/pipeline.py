@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Sequence
 from dataclasses import replace
 
 import numpy as np
@@ -10,12 +11,13 @@ import numpy as np
 from core.config import Config
 from core.fitness import evaluate_population_parallel
 from core.genetic import create_initial_population, hill_climb_elite, next_generation
+from core.guidance import EvolutionGuide
 from core.io import (
     load_reference_image,
     load_state,
     save_image,
 )
-from core.renderer import render_individual
+from core.renderer import render_individual, render_individual_float
 
 
 RUNTIME_CONFIG_FIELDS = {
@@ -26,7 +28,14 @@ RUNTIME_CONFIG_FIELDS = {
     "log_interval_sec",
     "log_level",
     "max_workers",
+    "parallel_min_pixels",
+    "renderer_backend",
+    "use_dirty_regions",
+    "numba_min_pixels",
+    "cuda_min_pixels",
     "use_compositing_cache",
+    "compositing_cache_stride",
+    "compositing_cache_max_mb",
 }
 
 
@@ -73,6 +82,7 @@ def run_evolution(
             for field in RUNTIME_CONFIG_FIELDS
         }
         config = replace(loaded_config, **runtime_overrides)
+        config.validate()
         logging.info("Resumed from iteration %d (fitness %.6f)", start_iteration, resume_fitness)
         start_iteration += 1
 
@@ -101,7 +111,15 @@ def run_evolution(
     logging.info("Reference image: %dx%d (%s)", width, height, config.mode)
     logging.info("Background color: %s", background)
 
-    population = create_initial_population(width, height, config.mode, config, resume_individual)
+    initial_guide = EvolutionGuide.from_background(reference, background)
+    population = create_initial_population(
+        width,
+        height,
+        config.mode,
+        config,
+        resume_individual,
+        initial_guide,
+    )
     max_workers = config.max_workers
 
     ranked = evaluate_population_parallel(population, reference, config, background, max_workers)
@@ -114,27 +132,30 @@ def run_evolution(
     global_best.fitness = best_fitness
 
     for iteration in range(start_iteration, iterations):
-        crossover_step = iteration % 2 == 0
         if stagnation > config.stagnation_threshold // 4:
             mutation_rate = min(config.mutation_rate * config.adaptive_mutation_boost, 3.0)
         else:
             mutation_rate = config.mutation_rate
 
+        baseline = render_individual_float(global_best, config, background)
+        guide = EvolutionGuide(reference, baseline)
         population = next_generation(
             population,
             ranked,
             config,
             mutation_rate,
-            crossover_generation=crossover_step,
+            crossover_generation=True,
+            guide=guide,
         )
 
-        if config.hill_climb_interval > 0 and iteration % config.hill_climb_interval == 0:
+        if (
+            config.hill_climb_interval > 0
+            and iteration > start_iteration
+            and iteration % config.hill_climb_interval == 0
+        ):
             seed_elite = population[0].copy()
             for _ in range(config.hill_climb_attempts):
-                population.append(hill_climb_elite(seed_elite, config))
-
-        for individual in population:
-            individual.fitness = float("inf")
+                population.append(hill_climb_elite(seed_elite, config, guide=guide))
 
         ranked = evaluate_population_parallel(population, reference, config, background, max_workers)
 
@@ -179,3 +200,43 @@ def run_evolution(
         save_image(final, save_path, config.mode)
     logging.info("Evolution complete. Best fitness: %.6f", global_best.fitness)
     return final, global_best.fitness
+
+
+def run_progressive_evolution(
+    image_path: str,
+    config: Config,
+    stages: Sequence[tuple[int, int]],
+    *,
+    seed: int | None = None,
+    save_path: str | None = None,
+) -> tuple[np.ndarray, float]:
+    """Evolve from coarse to fine using ``(downsample, iterations)`` stages."""
+    from core.evolver import EvolutionSession
+
+    if not stages:
+        raise ValueError("at least one progressive stage is required")
+    previous_downsample: int | None = None
+    for downsample, iterations in stages:
+        if downsample < 1 or iterations < 1:
+            raise ValueError("each stage needs a positive downsample and iteration count")
+        if previous_downsample is not None and downsample >= previous_downsample:
+            raise ValueError("progressive downsample values must strictly decrease")
+        previous_downsample = downsample
+
+    first_downsample, _ = stages[0]
+    session = EvolutionSession(image_path, config, downsample=first_downsample, seed=seed)
+    for stage_index, (downsample, iterations) in enumerate(stages):
+        if stage_index > 0:
+            session.refine_resolution(downsample)
+        for _ in range(iterations):
+            session.step()
+            if (
+                session.global_best.fitness <= session.config.fitness_goal
+                or session.stagnation >= session.config.stagnation_threshold
+            ):
+                break
+
+    final = session.render_best()
+    if save_path is not None:
+        save_image(final, save_path, config.mode)
+    return final, session.global_best.fitness

@@ -1,0 +1,6 @@
+-r requirements.txt
+numba>=0.61
+
+# NVIDIA CUDA is toolkit-specific. Install one matching your driver/toolkit:
+#   pip install "numba-cuda[cu12]"
+#   pip install "numba-cuda[cu13]"

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import copy
 import random
 
 from core.config import ColorMode, Config
+from core.guidance import EvolutionGuide
 from core.shapes import Individual
 
 
@@ -13,22 +13,40 @@ def create_initial_population(
     mode: ColorMode,
     config: Config,
     seed: Individual | None = None,
+    guide: EvolutionGuide | None = None,
 ) -> list[Individual]:
-    population = [
-        Individual.random(width, height, mode, config, config.nb_elements_initial)
-        for _ in range(config.pop_size)
-    ]
+    population: list[Individual] = []
     if seed is not None:
-        population[0] = seed.copy()
-        population[0].fitness = seed.fitness
+        seeded = seed.copy()
+        seeded.fitness = seed.fitness if seed._pixel_error_sum is not None else float("inf")
+        population.append(seeded)
+    while len(population) < config.pop_size:
+        population.append(
+            Individual.random(width, height, mode, config, config.nb_elements_initial, guide)
+        )
     return population
 
 
-def hill_climb_elite(elite: Individual, config: Config, rate: float = 0.5) -> Individual:
-    candidate = elite.copy()
-    candidate.mutate(config, rate=rate)
+def hill_climb_elite(
+    elite: Individual,
+    config: Config,
+    rate: float = 0.5,
+    guide: EvolutionGuide | None = None,
+) -> Individual:
+    candidate = elite.fork()
+    candidate.mutate(config, rate=config.mutation_rate * rate, guide=guide)
     candidate.fitness = float("inf")
     return candidate
+
+
+def _select_elite(
+    population: list[Individual],
+    ranked: list[tuple[int, float]],
+    elite_count: int,
+) -> Individual:
+    # Squaring biases selection toward the best ranks while preserving diversity.
+    rank = min(elite_count - 1, int(random.random() ** 2 * elite_count))
+    return population[ranked[rank][0]]
 
 
 def next_generation(
@@ -37,33 +55,32 @@ def next_generation(
     config: Config,
     mutation_rate: float,
     crossover_generation: bool,
+    guide: EvolutionGuide | None = None,
 ) -> list[Individual]:
-    elites = [copy.deepcopy(population[ranked[i][0]]) for i in range(config.nb_elite)]
-    offspring: list[Individual] = []
+    elite_count = min(config.nb_elite, len(ranked))
+    elite_sources = [population[ranked[index][0]] for index in range(elite_count)]
+    offspring = [elite.fork() for elite in elite_sources]
 
-    for elite in elites:
-        offspring.append(elite.copy())
-
-    if crossover_generation:
-        while len(offspring) < config.pop_size:
-            parent_a = population[ranked[random.randint(0, config.nb_elite - 1)][0]]
-            parent_b = population[ranked[random.randint(0, config.nb_elite - 1)][0]]
-            if random.random() < config.prob_blend_crossover:
-                child = Individual.crossover_blend(parent_a, parent_b, config)
+    crossover_weight = config.prob_uniform_crossover + config.prob_blend_crossover
+    while len(offspring) < config.pop_size:
+        parent_a = _select_elite(population, ranked, elite_count)
+        use_crossover = (
+            crossover_generation
+            and elite_count > 1
+            and crossover_weight > 0
+            and random.random() < config.crossover_rate
+        )
+        if use_crossover:
+            parent_b = _select_elite(population, ranked, elite_count)
+            uniform_probability = config.prob_uniform_crossover / crossover_weight
+            if random.random() < uniform_probability:
+                child = Individual.crossover_uniform(parent_a, parent_b, config, guide)
             else:
-                child = Individual.crossover_uniform(parent_a, parent_b, config)
-            child.mutate(config, rate=mutation_rate * 0.5)
-            offspring.append(child)
-    else:
-        for elite in elites:
-            mutant = elite.copy()
-            mutant.mutate(config, rate=mutation_rate)
-            offspring.append(mutant)
-
-        while len(offspring) < config.pop_size:
-            parent = population[ranked[random.randint(0, config.nb_elite - 1)][0]]
-            child = parent.copy()
-            child.mutate(config, rate=mutation_rate)
-            offspring.append(child)
+                child = Individual.crossover_blend(parent_a, parent_b, config, guide)
+            child.mutate(config, rate=mutation_rate * 0.75, guide=guide)
+        else:
+            child = parent_a.fork()
+            child.mutate(config, rate=mutation_rate, guide=guide)
+        offspring.append(child)
 
     return offspring[: config.pop_size]

@@ -1,9 +1,27 @@
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass
+
 import numpy as np
 
+from core.acceleration import (
+    mark_renderer_backend_failed,
+    render_shapes_accelerated,
+    render_voronoi_accelerated,
+    resolve_renderer_backend,
+)
 from core.config import ColorMode, Config
-from core.shapes import Circle, Individual, Shape, Square, Triangle, VoronoiSite
+from core.shapes import BBox, Circle, Individual, Shape, Square, Triangle, VoronoiSite
+
+
+@dataclass(slots=True)
+class RenderResult:
+    image: np.ndarray
+    dirty_bbox: BBox | None = None
+    previous_image: np.ndarray | None = None
+    previous_error_sum: float | None = None
+    incremental: bool = False
 
 
 def _alpha_factor(config: Config, shape: Shape) -> float:
@@ -12,73 +30,126 @@ def _alpha_factor(config: Config, shape: Shape) -> float:
     return shape.alpha / 255.0
 
 
-def _triangle_mask_local(tri: Triangle, min_x: int, min_y: int, max_x: int, max_y: int) -> np.ndarray:
-    x = np.arange(min_x, max_x + 1)
-    y = np.arange(min_y, max_y + 1)
-    xv, yv = np.meshgrid(x, y)
-
-    pt0, pt1, pt2 = tri.points
-    det = (pt1[1] - pt2[1]) * (pt0[0] - pt2[0]) + (pt2[0] - pt1[0]) * (pt0[1] - pt2[1])
-    if det == 0:
+def _triangle_mask_local(
+    tri: Triangle,
+    min_x: int,
+    min_y: int,
+    max_x: int,
+    max_y: int,
+) -> np.ndarray:
+    p0, p1, p2 = tri.points
+    area = (int(p1[0]) - int(p0[0])) * (int(p2[1]) - int(p0[1])) - (
+        int(p1[1]) - int(p0[1])
+    ) * (int(p2[0]) - int(p0[0]))
+    if area == 0:
         return np.zeros((max_y - min_y + 1, max_x - min_x + 1), dtype=bool)
 
-    a = ((pt1[1] - pt2[1]) * (xv - pt2[0]) + (pt2[0] - pt1[0]) * (yv - pt2[1])) / det
-    b = ((pt2[1] - pt0[1]) * (xv - pt2[0]) + (pt0[0] - pt2[0]) * (yv - pt2[1])) / det
-    c = 1.0 - a - b
-    return (a >= 0) & (b >= 0) & (c >= 0)
+    x = np.arange(min_x, max_x + 1, dtype=np.int64)[None, :]
+    y = np.arange(min_y, max_y + 1, dtype=np.int64)[:, None]
+    edge0 = (x - p0[0]) * (p1[1] - p0[1]) - (y - p0[1]) * (p1[0] - p0[0])
+    edge1 = (x - p1[0]) * (p2[1] - p1[1]) - (y - p1[1]) * (p2[0] - p1[0])
+    edge2 = (x - p2[0]) * (p0[1] - p2[1]) - (y - p2[1]) * (p0[0] - p2[0])
+    return ((edge0 >= 0) & (edge1 >= 0) & (edge2 >= 0)) | (
+        (edge0 <= 0) & (edge1 <= 0) & (edge2 <= 0)
+    )
 
 
-def _circle_mask_local(circle: Circle, min_x: int, min_y: int, max_x: int, max_y: int) -> np.ndarray:
-    x = np.arange(min_x, max_x + 1)
-    y = np.arange(min_y, max_y + 1)
-    xv, yv = np.meshgrid(x, y)
+def _circle_mask_local(
+    circle: Circle,
+    min_x: int,
+    min_y: int,
+    max_x: int,
+    max_y: int,
+) -> np.ndarray:
+    x = np.arange(min_x, max_x + 1, dtype=np.int64)[None, :]
+    y = np.arange(min_y, max_y + 1, dtype=np.int64)[:, None]
     cx, cy = circle.center
-    return (xv - cx) ** 2 + (yv - cy) ** 2 <= circle.radius ** 2
+    return (x - cx) ** 2 + (y - cy) ** 2 <= circle.radius ** 2
 
 
-def _square_mask_local(square: Square, min_x: int, min_y: int, max_x: int, max_y: int) -> np.ndarray:
-    x = np.arange(min_x, max_x + 1)
-    y = np.arange(min_y, max_y + 1)
-    xv, yv = np.meshgrid(x, y)
-    sx, sy = square.top_left
-    return (xv >= sx) & (xv <= sx + square.side) & (yv >= sy) & (yv <= sy + square.side)
+def _shape_mask_local(
+    shape: Shape,
+    width: int,
+    height: int,
+    min_x: int,
+    min_y: int,
+    max_x: int,
+    max_y: int,
+) -> tuple[np.ndarray, bool]:
+    cache_key = (width, height, min_x, min_y, max_x, max_y)
+    cached = shape._mask_cache
+    if cached is not None and cached[:6] == cache_key:
+        return cached[6], cached[7]
 
-
-def _shape_mask_local(shape: Shape, min_x: int, min_y: int, max_x: int, max_y: int) -> np.ndarray:
     if isinstance(shape, Triangle):
-        return _triangle_mask_local(shape, min_x, min_y, max_x, max_y)
-    if isinstance(shape, Circle):
-        return _circle_mask_local(shape, min_x, min_y, max_x, max_y)
-    if isinstance(shape, VoronoiSite):
-        return np.ones((max_y - min_y + 1, max_x - min_x + 1), dtype=bool)
-    return _square_mask_local(shape, min_x, min_y, max_x, max_y)
+        mask = _triangle_mask_local(shape, min_x, min_y, max_x, max_y)
+    elif isinstance(shape, Circle):
+        mask = _circle_mask_local(shape, min_x, min_y, max_x, max_y)
+    else:
+        mask = np.ones((max_y - min_y + 1, max_x - min_x + 1), dtype=bool)
+
+    nonempty = bool(mask.any())
+    mask.setflags(write=False)
+    shape._mask_cache = (*cache_key, mask, nonempty)
+    return mask, nonempty
 
 
-def _blend_region_grayscale(
-    canvas: np.ndarray,
-    shape: Shape,
-    min_x: int,
-    min_y: int,
-    mask: np.ndarray,
+def _blend_grayscale(
+    region: np.ndarray,
+    color: int,
     alpha: float,
+    mask: np.ndarray | None,
 ) -> None:
-    region = canvas[min_y : min_y + mask.shape[0], min_x : min_x + mask.shape[1]]
-    assert isinstance(shape.color, int)
-    region[mask] = alpha * shape.color + (1.0 - alpha) * region[mask]
+    if alpha <= 0.0:
+        return
+    if alpha >= 1.0:
+        if mask is None:
+            region.fill(color)
+        else:
+            region[mask] = color
+        return
+
+    if mask is None:
+        region *= 1.0 - alpha
+        region += alpha * color
+    else:
+        values = region[mask]
+        values *= 1.0 - alpha
+        values += alpha * color
+        region[mask] = values
 
 
-def _blend_region_color(
-    canvas: np.ndarray,
-    shape: Shape,
-    min_x: int,
-    min_y: int,
-    mask: np.ndarray,
+def _blend_color(
+    region: np.ndarray,
+    color: tuple[int, int, int],
     alpha: float,
+    mask: np.ndarray | None,
 ) -> None:
-    region = canvas[min_y : min_y + mask.shape[0], min_x : min_x + mask.shape[1]]
-    assert isinstance(shape.color, tuple)
-    color = np.array(shape.color, dtype=np.float32)
-    region[mask] = alpha * color + (1.0 - alpha) * region[mask]
+    if alpha <= 0.0:
+        return
+    if alpha >= 1.0:
+        if mask is None:
+            region[...] = color
+        else:
+            region[mask] = color
+        return
+
+    color_array = np.asarray(color, dtype=np.float32)
+    if mask is None:
+        region *= 1.0 - alpha
+        region += alpha * color_array
+    else:
+        values = region[mask]
+        values *= 1.0 - alpha
+        values += alpha * color_array
+        region[mask] = values
+
+
+def _shape_bounds(shape: Shape, width: int, height: int) -> BBox:
+    mask_cache = shape._mask_cache
+    if mask_cache is not None and mask_cache[:2] == (width, height):
+        return mask_cache[2:6]
+    return shape.bounding_box(width, height)
 
 
 def composite_shape(
@@ -89,101 +160,418 @@ def composite_shape(
     mode: ColorMode,
     config: Config,
 ) -> None:
-    min_x, min_y, max_x, max_y = shape.bounding_box(width, height)
+    min_x, min_y, max_x, max_y = _shape_bounds(shape, width, height)
     if min_x > max_x or min_y > max_y:
         return
 
-    mask = _shape_mask_local(shape, min_x, min_y, max_x, max_y)
-    if not mask.any():
-        return
+    mask = None
+    if not isinstance(shape, Square):
+        mask, nonempty = _shape_mask_local(shape, width, height, min_x, min_y, max_x, max_y)
+        if not nonempty:
+            return
 
+    region = canvas[min_y : max_y + 1, min_x : max_x + 1]
     alpha = _alpha_factor(config, shape)
     if mode == "grayscale":
-        _blend_region_grayscale(canvas, shape, min_x, min_y, mask, alpha)
+        assert isinstance(shape.color, int)
+        _blend_grayscale(region, shape.color, alpha, mask)
     else:
-        _blend_region_color(canvas, shape, min_x, min_y, mask, alpha)
+        assert isinstance(shape.color, tuple)
+        _blend_color(region, shape.color, alpha, mask)
 
 
-def new_canvas(width: int, height: int, mode: ColorMode, background: int | tuple[int, int, int]) -> np.ndarray:
+def composite_shape_region(
+    canvas: np.ndarray,
+    shape: Shape,
+    width: int,
+    height: int,
+    mode: ColorMode,
+    config: Config,
+    clip_bbox: BBox,
+) -> None:
+    shape_min_x, shape_min_y, shape_max_x, shape_max_y = _shape_bounds(shape, width, height)
+    clip_min_x, clip_min_y, clip_max_x, clip_max_y = clip_bbox
+    min_x = max(shape_min_x, clip_min_x)
+    min_y = max(shape_min_y, clip_min_y)
+    max_x = min(shape_max_x, clip_max_x)
+    max_y = min(shape_max_y, clip_max_y)
+    if min_x > max_x or min_y > max_y:
+        return
+
+    mask = None
+    if not isinstance(shape, Square):
+        full_mask, nonempty = _shape_mask_local(
+            shape,
+            width,
+            height,
+            shape_min_x,
+            shape_min_y,
+            shape_max_x,
+            shape_max_y,
+        )
+        if not nonempty:
+            return
+        mask = full_mask[
+            min_y - shape_min_y : max_y - shape_min_y + 1,
+            min_x - shape_min_x : max_x - shape_min_x + 1,
+        ]
+        if not mask.any():
+            return
+
+    region = canvas[
+        min_y - clip_min_y : max_y - clip_min_y + 1,
+        min_x - clip_min_x : max_x - clip_min_x + 1,
+    ]
+    alpha = _alpha_factor(config, shape)
     if mode == "grayscale":
-        return np.full((height, width), background, dtype=np.float32)
-    assert isinstance(background, tuple)
-    canvas = np.zeros((height, width, 3), dtype=np.float32)
-    for c, value in enumerate(background):
-        canvas[..., c] = value
+        assert isinstance(shape.color, int)
+        _blend_grayscale(region, shape.color, alpha, mask)
+    else:
+        assert isinstance(shape.color, tuple)
+        _blend_color(region, shape.color, alpha, mask)
+
+
+def new_canvas(
+    width: int,
+    height: int,
+    mode: ColorMode,
+    background: int | tuple[int, int, int],
+) -> np.ndarray:
+    shape = (height, width) if mode == "grayscale" else (height, width, 3)
+    canvas = np.empty(shape, dtype=np.float32)
+    canvas[...] = background
     return canvas
 
 
-def render_voronoi(individual: Individual, background: int | tuple[int, int, int]) -> np.ndarray:
+def render_voronoi_float(
+    individual: Individual,
+    background: int | tuple[int, int, int],
+) -> np.ndarray:
     width, height = individual.width, individual.height
     mode = individual.mode
     sites = [shape for shape in individual.triangles if isinstance(shape, VoronoiSite)]
+    canvas = new_canvas(width, height, mode, background)
     if not sites:
-        return np.clip(new_canvas(width, height, mode, background), 0, 255).astype(np.uint8)
+        return canvas
 
-    yy, xx = np.indices((height, width))
+    x = np.arange(width, dtype=np.float32)[None, :]
+    y = np.arange(height, dtype=np.float32)[:, None]
     best_dist = np.full((height, width), np.inf, dtype=np.float32)
-    if mode == "grayscale":
-        canvas = new_canvas(width, height, mode, background)
-        for site in sites:
-            sx, sy = site.point
-            dist = (xx - sx) ** 2 + (yy - sy) ** 2
-            mask = dist < best_dist
-            assert isinstance(site.color, int)
-            canvas[mask] = site.color
-            best_dist[mask] = dist[mask]
+    for site in sites:
+        sx, sy = site.point
+        dist = (x - float(sx)) ** 2 + (y - float(sy)) ** 2
+        mask = dist < best_dist
+        canvas[mask] = site.color
+        np.minimum(best_dist, dist, out=best_dist)
+
+    return canvas
+
+
+def render_voronoi(
+    individual: Individual,
+    background: int | tuple[int, int, int],
+) -> np.ndarray:
+    rendered = np.clip(render_voronoi_float(individual, background), 0, 255)
+    return np.rint(rendered).astype(np.uint8)
+
+
+def _render_cache_signature(
+    individual: Individual,
+    config: Config,
+    background: int | tuple[int, int, int],
+) -> tuple[object, ...]:
+    return (
+        individual.mode,
+        background,
+        config.fixed_alpha,
+        config.shape_mode,
+        config.renderer_backend,
+        config.numba_min_pixels,
+        config.cuda_min_pixels,
+        config.compositing_cache_stride,
+        config.compositing_cache_max_mb,
+    )
+
+
+def _render_incremental(
+    individual: Individual,
+    config: Config,
+    background: int | tuple[int, int, int],
+) -> RenderResult | None:
+    if (
+        not config.use_dirty_regions
+        or not config.use_compositing_cache
+        or individual._base_render is None
+        or individual._dirty_from is None
+        or individual._dirty_bbox is None
+        or individual._compositing_cache_signature
+        != _render_cache_signature(individual, config, background)
+        or config.shape_mode == "voronoi"
+        or any(isinstance(shape, VoronoiSite) for shape in individual.triangles)
+    ):
+        return None
+
+    width, height = individual.width, individual.height
+    base_render = individual._base_render
+    if base_render.shape[:2] != (height, width):
+        return None
+
+    dirty_min_x, dirty_min_y, dirty_max_x, dirty_max_y = individual._dirty_bbox
+    dirty_bbox = (
+        max(0, dirty_min_x),
+        max(0, dirty_min_y),
+        min(width - 1, dirty_max_x),
+        min(height - 1, dirty_max_y),
+    )
+    if dirty_bbox[0] > dirty_bbox[2] or dirty_bbox[1] > dirty_bbox[3]:
+        return None
+
+    cache = individual._compositing_cache
+    prefix_index = -1
+    max_prefix = min(individual._dirty_from - 1, len(cache) - 1)
+    for index in range(max_prefix, -1, -1):
+        if cache[index] is not None:
+            prefix_index = index
+            break
+
+    min_x, min_y, max_x, max_y = dirty_bbox
+    if prefix_index >= 0:
+        prefix = cache[prefix_index]
+        assert prefix is not None
+        region = prefix[min_y : max_y + 1, min_x : max_x + 1].copy()
     else:
-        canvas = new_canvas(width, height, mode, background)
-        for site in sites:
-            sx, sy = site.point
-            dist = (xx - sx) ** 2 + (yy - sy) ** 2
-            mask = dist < best_dist
-            assert isinstance(site.color, tuple)
-            canvas[mask] = site.color
-            best_dist[mask] = dist[mask]
+        region = new_canvas(max_x - min_x + 1, max_y - min_y + 1, individual.mode, background)
 
-    return np.clip(canvas, 0, 255).astype(np.uint8)
+    backend = resolve_renderer_backend(config.renderer_backend, region.size, config)
+    if backend == "numpy":
+        for index in range(prefix_index + 1, len(individual.triangles)):
+            composite_shape_region(
+                region,
+                individual.triangles[index],
+                width,
+                height,
+                individual.mode,
+                config,
+                dirty_bbox,
+            )
+    else:
+        try:
+            region = render_shapes_accelerated(
+                region,
+                individual,
+                config,
+                prefix_index + 1,
+                min_x,
+                min_y,
+                backend,
+            )
+        except Exception as exc:
+            if config.renderer_backend != "auto":
+                raise
+            if mark_renderer_backend_failed(backend, exc):
+                logging.warning("%s renderer failed; using NumPy: %s", backend, exc)
+            if prefix_index >= 0:
+                prefix = cache[prefix_index]
+                assert prefix is not None
+                region = prefix[min_y : max_y + 1, min_x : max_x + 1].copy()
+            else:
+                region = new_canvas(
+                    max_x - min_x + 1,
+                    max_y - min_y + 1,
+                    individual.mode,
+                    background,
+                )
+            for index in range(prefix_index + 1, len(individual.triangles)):
+                composite_shape_region(
+                    region,
+                    individual.triangles[index],
+                    width,
+                    height,
+                    individual.mode,
+                    config,
+                    dirty_bbox,
+                )
+
+    canvas = base_render.copy()
+    canvas[min_y : max_y + 1, min_x : max_x + 1] = region
+    if len(cache) < len(individual.triangles):
+        cache.extend([None] * (len(individual.triangles) - len(cache)))
+    elif len(cache) > len(individual.triangles):
+        del cache[len(individual.triangles) :]
+    if cache:
+        cache[-1] = canvas
+
+    previous_error_sum = individual._base_error_sum
+    individual._compositing_cache = cache
+    individual._clear_dirty_tracking()
+    return RenderResult(
+        image=canvas,
+        dirty_bbox=dirty_bbox,
+        previous_image=base_render,
+        previous_error_sum=previous_error_sum,
+        incremental=True,
+    )
 
 
-def render_individual(individual: Individual, config: Config, background: int | tuple[int, int, int]) -> np.ndarray:
+def _render_individual_full(
+    individual: Individual,
+    config: Config,
+    background: int | tuple[int, int, int],
+) -> np.ndarray:
     width, height = individual.width, individual.height
     mode = individual.mode
-
-    if config.shape_mode == "voronoi" or any(isinstance(shape, VoronoiSite) for shape in individual.triangles):
-        return render_voronoi(individual, background)
-
+    if not config.use_compositing_cache and individual._compositing_cache:
+        individual.clear_caches(include_shape_masks=False)
+    cache_signature = _render_cache_signature(individual, config, background)
+    if (
+        config.use_compositing_cache
+        and individual._compositing_cache_signature != cache_signature
+    ):
+        individual._compositing_cache = []
     cache = individual._compositing_cache if config.use_compositing_cache else []
+
+    is_voronoi = config.shape_mode == "voronoi" or any(
+        isinstance(shape, VoronoiSite) for shape in individual.triangles
+    )
+    if is_voronoi:
+        final_index = len(individual.triangles) - 1
+        if (
+            cache
+            and final_index >= 0
+            and len(cache) > final_index
+            and cache[final_index] is not None
+        ):
+            cached = cache[final_index]
+            assert cached is not None
+            return cached
+        pixel_values = width * height * (1 if mode == "grayscale" else 3)
+        backend = resolve_renderer_backend(config.renderer_backend, pixel_values, config)
+        if backend == "numpy":
+            canvas = render_voronoi_float(individual, background)
+        else:
+            try:
+                canvas = render_voronoi_accelerated(
+                    new_canvas(width, height, mode, background),
+                    individual,
+                    config,
+                    backend,
+                )
+            except Exception as exc:
+                if config.renderer_backend != "auto":
+                    raise
+                if mark_renderer_backend_failed(backend, exc):
+                    logging.warning("%s renderer failed; using NumPy: %s", backend, exc)
+                canvas = render_voronoi_float(individual, background)
+        if config.use_compositing_cache:
+            cache = [None] * len(individual.triangles)
+            if final_index >= 0:
+                cache[final_index] = canvas
+            individual._compositing_cache = cache
+            individual._compositing_cache_signature = cache_signature
+        return canvas
+
     cached_index = -1
     if cache:
         max_cache_index = min(len(cache), len(individual.triangles)) - 1
-        for i in range(max_cache_index, -1, -1):
-            if cache[i] is not None:
-                cached_index = i
+        for index in range(max_cache_index, -1, -1):
+            if cache[index] is not None:
+                cached_index = index
                 break
 
     if cached_index >= 0:
         cached = cache[cached_index]
         assert cached is not None
         if cached_index == len(individual.triangles) - 1:
-            return np.clip(cached, 0, 255).astype(np.uint8)
+            return cached
         canvas = cached.copy()
     else:
         canvas = new_canvas(width, height, mode, background)
         if config.use_compositing_cache:
             cache = [None] * len(individual.triangles)
 
-    if config.use_compositing_cache and len(cache) < len(individual.triangles):
-        cache.extend([None] * (len(individual.triangles) - len(cache)))
-    elif config.use_compositing_cache and len(cache) > len(individual.triangles):
-        del cache[len(individual.triangles) :]
+    if config.use_compositing_cache:
+        if len(cache) < len(individual.triangles):
+            cache.extend([None] * (len(individual.triangles) - len(cache)))
+        elif len(cache) > len(individual.triangles):
+            del cache[len(individual.triangles) :]
 
-    for index in range(cached_index + 1, len(individual.triangles)):
-        shape = individual.triangles[index]
-        composite_shape(canvas, shape, width, height, mode, config)
-        if config.use_compositing_cache:
-            cache[index] = canvas.copy()
+    final_index = len(individual.triangles) - 1
+    max_cache_bytes = int(config.compositing_cache_max_mb * 1024 * 1024)
+    max_checkpoints = max(1, max_cache_bytes // max(1, canvas.nbytes))
+    budget_stride = max(
+        1,
+        (len(individual.triangles) + max_checkpoints - 1) // max_checkpoints,
+    )
+    stride = max(config.compositing_cache_stride, budget_stride)
+    backend = resolve_renderer_backend(config.renderer_backend, canvas.size, config)
+    if backend == "numpy":
+        for index in range(cached_index + 1, len(individual.triangles)):
+            composite_shape(canvas, individual.triangles[index], width, height, mode, config)
+            should_cache = index == final_index or (index + 1) % stride == 0
+            if config.use_compositing_cache and should_cache:
+                cache[index] = canvas if index == final_index else canvas.copy()
+    elif cached_index < final_index:
+        try:
+            canvas = render_shapes_accelerated(
+                canvas,
+                individual,
+                config,
+                cached_index + 1,
+                0,
+                0,
+                backend,
+            )
+            if config.use_compositing_cache and final_index >= 0:
+                cache[final_index] = canvas
+        except Exception as exc:
+            if config.renderer_backend != "auto":
+                raise
+            if mark_renderer_backend_failed(backend, exc):
+                logging.warning("%s renderer failed; using NumPy: %s", backend, exc)
+            if cached_index >= 0:
+                cached = cache[cached_index]
+                assert cached is not None
+                canvas = cached.copy()
+            else:
+                canvas = new_canvas(width, height, mode, background)
+            for index in range(cached_index + 1, len(individual.triangles)):
+                composite_shape(canvas, individual.triangles[index], width, height, mode, config)
+                should_cache = index == final_index or (index + 1) % stride == 0
+                if config.use_compositing_cache and should_cache:
+                    cache[index] = canvas if index == final_index else canvas.copy()
 
     if config.use_compositing_cache:
         individual._compositing_cache = cache
+        individual._compositing_cache_signature = cache_signature
 
-    return np.clip(canvas, 0, 255).astype(np.uint8)
+    return canvas
+
+
+def render_individual_for_scoring(
+    individual: Individual,
+    config: Config,
+    background: int | tuple[int, int, int],
+) -> RenderResult:
+    incremental = _render_incremental(individual, config, background)
+    if incremental is not None:
+        return incremental
+    image = _render_individual_full(individual, config, background)
+    individual._clear_dirty_tracking()
+    return RenderResult(image=image)
+
+
+def render_individual_float(
+    individual: Individual,
+    config: Config,
+    background: int | tuple[int, int, int],
+) -> np.ndarray:
+    return render_individual_for_scoring(individual, config, background).image
+
+
+def render_individual(
+    individual: Individual,
+    config: Config,
+    background: int | tuple[int, int, int],
+) -> np.ndarray:
+    rendered = np.clip(render_individual_float(individual, config, background), 0, 255)
+    return np.rint(rendered).astype(np.uint8)
