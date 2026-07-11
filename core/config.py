@@ -69,5 +69,31 @@ class Config:
     # Runtime (set during execution)
     background: int | tuple[int, int, int] = field(default=255, repr=False)
 
+    def validate(self) -> None:
+        if self.pop_size < 2:
+            raise ValueError("pop_size must be at least 2")
+        if self.nb_elite < 1:
+            raise ValueError("nb_elite must be at least 1")
+        if self.nb_elite >= self.pop_size:
+            raise ValueError("nb_elite must be smaller than pop_size")
+        if self.nb_elements_initial < 1:
+            raise ValueError("nb_elements_initial must be at least 1")
+        if self.nb_elements_max < self.nb_elements_initial:
+            raise ValueError("nb_elements_max must be greater than or equal to nb_elements_initial")
+        if self.min_triangles < 1:
+            raise ValueError("min_triangles must be at least 1")
+        if self.nb_elements_max < self.min_triangles:
+            raise ValueError("nb_elements_max must be greater than or equal to min_triangles")
+        if self.max_workers < 0:
+            raise ValueError("max_workers must be 0 or greater")
+        if not 0 <= self.alpha_min <= 255:
+            raise ValueError("alpha_min must be between 0 and 255")
+        if not 0 <= self.alpha_max <= 255:
+            raise ValueError("alpha_max must be between 0 and 255")
+        if self.alpha_min > self.alpha_max:
+            raise ValueError("alpha_min must be less than or equal to alpha_max")
+        if self.fixed_alpha > 1.0:
+            raise ValueError("fixed_alpha must be negative or between 0.0 and 1.0")
+
     def elite_fraction(self) -> float:
         return self.nb_elite / max(self.pop_size, 1)

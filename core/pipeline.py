@@ -7,24 +7,13 @@ from dataclasses import replace
 
 import numpy as np
 
-from core.config import ColorMode, Config
+from core.config import Config
 from core.fitness import evaluate_population_parallel
 from core.genetic import create_initial_population, hill_climb_elite, next_generation
 from core.io import (
-    create_gif,
     load_reference_image,
     load_state,
-    save_comparison,
     save_image,
-    save_state,
-)
-from core.paths import (
-    COMPARISON_IMAGE_NAME,
-    EVOLUTION_GIF_NAME,
-    FINAL_IMAGE_NAME,
-    STATE_FILE_NAME,
-    iteration_frame_path,
-    output_artifact,
 )
 from core.renderer import render_individual
 
@@ -61,14 +50,19 @@ def run_evolution(
     downsample: int = 1,
     resume_path: str | None = None,
     seed: int | None = None,
+    save_path: str | None = None,
 ) -> tuple[np.ndarray, float]:
+    if iterations < 1:
+        raise ValueError("iterations must be at least 1")
+    if downsample < 1:
+        raise ValueError("downsample must be at least 1")
+    config.validate()
+
     if seed is not None:
         import random
 
         random.seed(seed)
         np.random.seed(seed)
-
-    os.makedirs(config.save_directory, exist_ok=True)
 
     start_iteration = 0
     resume_individual = None
@@ -112,7 +106,6 @@ def run_evolution(
 
     ranked = evaluate_population_parallel(population, reference, config, background, max_workers)
     best_index, best_fitness = ranked[0]
-    last_saved_fitness = float("inf")
     last_log_time = time.time()
     stagnation = 0
     mutation_rate = config.mutation_rate
@@ -152,43 +145,28 @@ def run_evolution(
                 key=lambda item: item[1],
             )
 
-        best_index, best_fitness = ranked[0]
+        best_index, current_best_fitness = ranked[0]
 
-        if best_fitness < global_best.fitness:
+        if current_best_fitness < global_best.fitness:
             global_best = population[best_index].copy()
-            global_best.fitness = best_fitness
+            global_best.fitness = current_best_fitness
             stagnation = 0
-            logging.info("New best fitness %.6f at iteration %d", best_fitness, iteration)
+            logging.info("New best fitness %.6f at iteration %d", current_best_fitness, iteration)
         else:
             stagnation += 1
 
         if time.time() - last_log_time >= config.log_interval_sec:
             logging.info(
-                "Iteration %d | triangles %d | fitness %.6f | mutation %.2f",
+                "Iteration %d | triangles %d | current %.6f | best %.6f | mutation %.2f",
                 iteration,
                 len(population[best_index].triangles),
-                best_fitness,
+                current_best_fitness,
+                global_best.fitness,
                 mutation_rate,
             )
             last_log_time = time.time()
 
-        if best_fitness < last_saved_fitness:
-            frame_path = iteration_frame_path(config.save_directory, iteration)
-            rendered = render_individual(global_best, config, background)
-            save_image(rendered, str(frame_path), config.mode)
-            save_state(
-                str(output_artifact(config.save_directory, STATE_FILE_NAME)),
-                iteration,
-                global_best,
-                best_fitness,
-                config,
-                background,
-                source_image=os.path.abspath(image_path),
-                downsample=downsample,
-            )
-            last_saved_fitness = best_fitness
-
-        if best_fitness <= config.fitness_goal:
+        if global_best.fitness <= config.fitness_goal:
             logging.info("Fitness goal reached at iteration %d", iteration)
             break
 
@@ -197,13 +175,7 @@ def run_evolution(
             break
 
     final = render_individual(global_best, config, background)
-    final_path = output_artifact(config.save_directory, FINAL_IMAGE_NAME)
-    save_image(final, str(final_path), config.mode)
-
-    if config.save_comparison:
-        comparison_path = output_artifact(config.save_directory, COMPARISON_IMAGE_NAME)
-        save_comparison(reference, final, str(comparison_path), config.mode)
-
-    create_gif(config.save_directory, EVOLUTION_GIF_NAME, config.gif_frame_duration_ms)
+    if save_path is not None:
+        save_image(final, save_path, config.mode)
     logging.info("Evolution complete. Best fitness: %.6f", global_best.fitness)
     return final, global_best.fitness

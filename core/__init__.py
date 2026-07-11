@@ -1,8 +1,9 @@
 """Core library for triangle-based genetic image approximation."""
 
 from core.config import Config
+from core.evolver import EvolutionSession, EvolutionSnapshot
 
-__all__ = ["Config"]
+__all__ = ["Config", "EvolutionSession", "EvolutionSnapshot"]
 
 
 def run_evolution(*args, **kwargs):

@@ -64,8 +64,7 @@ def _blend_region_grayscale(
 ) -> None:
     region = canvas[min_y : min_y + mask.shape[0], min_x : min_x + mask.shape[1]]
     assert isinstance(shape.color, int)
-    blended = np.where(mask, alpha * shape.color + (1.0 - alpha) * region, region)
-    canvas[min_y : min_y + mask.shape[0], min_x : min_x + mask.shape[1]] = blended
+    region[mask] = alpha * shape.color + (1.0 - alpha) * region[mask]
 
 
 def _blend_region_color(
@@ -78,10 +77,8 @@ def _blend_region_color(
 ) -> None:
     region = canvas[min_y : min_y + mask.shape[0], min_x : min_x + mask.shape[1]]
     assert isinstance(shape.color, tuple)
-    for channel, value in enumerate(shape.color):
-        channel_region = region[..., channel]
-        blended = np.where(mask, alpha * value + (1.0 - alpha) * channel_region, channel_region)
-        canvas[min_y : min_y + mask.shape[0], min_x : min_x + mask.shape[1], channel] = blended
+    color = np.array(shape.color, dtype=np.float32)
+    region[mask] = alpha * color + (1.0 - alpha) * region[mask]
 
 
 def composite_shape(

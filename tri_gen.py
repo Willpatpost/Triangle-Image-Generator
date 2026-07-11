@@ -1,236 +1,286 @@
 #!/usr/bin/env python3
-"""Evolve semi-transparent shapes to approximate a target image."""
+"""Desktop GUI for evolving shapes into an image."""
 
 from __future__ import annotations
 
-import argparse
-import sys
+import queue
+import threading
+import time
+import tkinter as tk
+from dataclasses import dataclass
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
+
+import numpy as np
+from PIL import Image, ImageTk
 
 from core.config import Config
-from core.paths import resolve_image_path, resolve_output_dir, resolve_project_path
-from core.pipeline import run_evolution, setup_logging
-
-EPILOG = """
-examples:
-  python tri_gen.py
-  python tri_gen.py -i Yinyang.png --downsample 2
-  python tri_gen.py -i images/Yinyang.png --iterations 5000
-  python tri_gen.py -i photo.jpg --mode color -o output/color-run
-  python tri_gen.py -i photo.jpg --shape mixed --mode color
-  python tri_gen.py -i photo.jpg --shape voronoi --shapes 80
-  python tri_gen.py --resume
-  python tri_gen.py --resume output/best_state.json --iterations 20000
-"""
+from core.evolver import EvolutionSession, EvolutionSnapshot
+from core.io import save_image
 
 
-class HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
-    pass
+CANVAS_WIDTH = 520
+CANVAS_HEIGHT = 430
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="tri_gen",
-        description=(
-            "Approximate an image with semi-transparent shapes using a genetic algorithm."
-        ),
-        formatter_class=HelpFormatter,
-        epilog=EPILOG,
-    )
-
-    input_group = parser.add_argument_group("Input")
-    input_group.add_argument(
-        "--image",
-        "-i",
-        default="images/Yinyang.png",
-        metavar="PATH",
-        help="Target image (searches images/ if given as a filename).",
-    )
-    input_group.add_argument(
-        "--mode",
-        choices=("grayscale", "color"),
-        default="color",
-        help="Render shapes in grayscale or full color.",
-    )
-    input_group.add_argument(
-        "--shape",
-        choices=("triangle", "circle", "square", "voronoi", "mixed"),
-        default="triangle",
-        help="Primitive shape type to evolve.",
-    )
-    input_group.add_argument(
-        "--downsample",
-        type=int,
-        default=1,
-        metavar="N",
-        help="Shrink the image by this factor before evolving (faster previews).",
-    )
-
-    evolution_group = parser.add_argument_group("Evolution")
-    evolution_group.add_argument(
-        "--iterations",
-        type=int,
-        default=30_000,
-        metavar="N",
-        help="Maximum number of generations to run.",
-    )
-    evolution_group.add_argument(
-        "--resume",
-        nargs="?",
-        const="output/best_state.json",
-        default=None,
-        metavar="PATH",
-        help="Continue from a saved state (default: output/best_state.json).",
-    )
-    evolution_group.add_argument(
-        "--seed",
-        type=int,
-        default=None,
-        metavar="N",
-        help="Random seed for reproducible runs.",
-    )
-
-    population_group = parser.add_argument_group("Population")
-    population_group.add_argument(
-        "--pop-size",
-        type=int,
-        default=30,
-        metavar="N",
-        help="Number of candidates evaluated each generation.",
-    )
-    population_group.add_argument(
-        "--elite",
-        type=int,
-        default=6,
-        metavar="N",
-        help="Top candidates preserved unchanged each generation.",
-    )
-    population_group.add_argument(
-        "--triangles",
-        "--shapes",
-        type=int,
-        default=15,
-        dest="triangles",
-        metavar="N",
-        help="Starting shape count per candidate.",
-    )
-    population_group.add_argument(
-        "--max-triangles",
-        "--max-shapes",
-        type=int,
-        default=150,
-        dest="max_triangles",
-        metavar="N",
-        help="Maximum shapes allowed per candidate.",
-    )
-
-    output_group = parser.add_argument_group("Output")
-    output_group.add_argument(
-        "--output",
-        "-o",
-        default="output",
-        metavar="DIR",
-        help="Directory for results, GIF, and saved state.",
-    )
-    output_group.add_argument(
-        "--no-comparison",
-        action="store_true",
-        help="Do not save the target/result/diff comparison image.",
-    )
-    output_group.add_argument(
-        "--quiet",
-        action="store_true",
-        help="Suppress progress logs.",
-    )
-    output_group.add_argument(
-        "--log-level",
-        default="INFO",
-        choices=("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"),
-        help="Logging verbosity when not using --quiet.",
-    )
-
-    advanced_group = parser.add_argument_group("Advanced")
-    advanced_group.add_argument(
-        "--workers",
-        type=int,
-        default=0,
-        metavar="N",
-        help="Parallel fitness workers (0 = one worker per CPU core minus one).",
-    )
-
-    return parser
+@dataclass
+class WorkerUpdate:
+    run_id: int
+    snapshot: EvolutionSnapshot
+    rendered: np.ndarray
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
+@dataclass
+class WorkerError:
+    run_id: int
+    error: Exception
 
-    if args.downsample < 1:
-        parser.error("--downsample must be at least 1")
 
-    if args.iterations < 1:
-        parser.error("--iterations must be at least 1")
+class TriangleImageApp(tk.Tk):
+    def __init__(self) -> None:
+        super().__init__()
+        self.title("Triangle Image Generator")
+        self.minsize(1120, 680)
 
-    if args.pop_size < 2:
-        parser.error("--pop-size must be at least 2")
+        self.image_path: Path | None = None
+        self.target_photo: ImageTk.PhotoImage | None = None
+        self.evolution_photo: ImageTk.PhotoImage | None = None
+        self.best_image: np.ndarray | None = None
+        self.session: EvolutionSession | None = None
+        self.worker: threading.Thread | None = None
+        self.stop_event = threading.Event()
+        self.updates: queue.Queue[WorkerUpdate | WorkerError] = queue.Queue()
+        self.run_id = 0
 
-    if args.elite < 1:
-        parser.error("--elite must be at least 1")
+        self.shape_var = tk.StringVar(value="triangle")
+        self.mode_var = tk.StringVar(value="color")
+        self.downsample_var = tk.IntVar(value=2)
+        self.status_var = tk.StringVar(value="Choose an image to begin.")
 
-    if args.elite >= args.pop_size:
-        parser.error("--elite must be smaller than --pop-size")
+        self._build_ui()
+        self.after(80, self._poll_updates)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    if args.triangles < 1:
-        parser.error("--triangles must be at least 1")
+    def _build_ui(self) -> None:
+        style = ttk.Style(self)
+        style.configure("Panel.TFrame", padding=12)
+        style.configure("Title.TLabel", font=("Segoe UI", 14, "bold"))
+        style.configure("Status.TLabel", font=("Segoe UI", 10))
 
-    if args.max_triangles < args.triangles:
-        parser.error("--max-triangles must be greater than or equal to --triangles")
+        toolbar = ttk.Frame(self, padding=(16, 14, 16, 8))
+        toolbar.pack(fill=tk.X)
 
-    if args.max_triangles < Config().min_triangles:
-        parser.error(f"--max-triangles must be at least {Config().min_triangles}")
+        ttk.Button(toolbar, text="Choose Image", command=self._choose_image).pack(side=tk.LEFT)
 
-    if args.workers < 0:
-        parser.error("--workers must be 0 or greater")
-
-    image_path = resolve_image_path(args.image)
-    if not image_path.is_file():
-        parser.error(f"Image not found: {image_path}")
-
-    output_dir = resolve_output_dir(args.output)
-    resume_path = None
-    if args.resume is not None:
-        resume_path = resolve_project_path(args.resume)
-        if not resume_path.is_file():
-            parser.error(f"Resume state not found: {resume_path}")
-
-    config = Config(
-        mode=args.mode,
-        shape_mode=args.shape,
-        pop_size=args.pop_size,
-        nb_elite=args.elite,
-        nb_elements_initial=args.triangles,
-        nb_elements_max=args.max_triangles,
-        max_workers=args.workers,
-        save_directory=str(output_dir),
-        save_comparison=not args.no_comparison,
-        log_level=args.log_level,
-        enable_logging=not args.quiet,
-    )
-
-    setup_logging(config.log_level, config.enable_logging)
-
-    try:
-        run_evolution(
-            str(image_path),
-            config,
-            iterations=args.iterations,
-            downsample=args.downsample,
-            resume_path=str(resume_path) if resume_path else None,
-            seed=args.seed,
+        ttk.Label(toolbar, text="Shape").pack(side=tk.LEFT, padx=(18, 6))
+        shape_box = ttk.Combobox(
+            toolbar,
+            textvariable=self.shape_var,
+            values=("triangle", "circle", "square", "voronoi", "mixed"),
+            width=12,
+            state="readonly",
         )
-    except ValueError as exc:
-        parser.error(str(exc))
+        shape_box.pack(side=tk.LEFT)
+
+        ttk.Label(toolbar, text="Mode").pack(side=tk.LEFT, padx=(18, 6))
+        mode_box = ttk.Combobox(
+            toolbar,
+            textvariable=self.mode_var,
+            values=("color", "grayscale"),
+            width=10,
+            state="readonly",
+        )
+        mode_box.pack(side=tk.LEFT)
+
+        ttk.Label(toolbar, text="Preview size").pack(side=tk.LEFT, padx=(18, 6))
+        ttk.Spinbox(
+            toolbar,
+            from_=1,
+            to=6,
+            textvariable=self.downsample_var,
+            width=4,
+            justify=tk.CENTER,
+        ).pack(side=tk.LEFT)
+
+        self.start_button = ttk.Button(toolbar, text="Start", command=self._start_evolving, state=tk.DISABLED)
+        self.start_button.pack(side=tk.LEFT, padx=(24, 6))
+
+        self.stop_button = ttk.Button(toolbar, text="Stop", command=self._stop_evolving, state=tk.DISABLED)
+        self.stop_button.pack(side=tk.LEFT)
+
+        self.save_button = ttk.Button(toolbar, text="Save Best", command=self._save_best, state=tk.DISABLED)
+        self.save_button.pack(side=tk.RIGHT)
+
+        body = ttk.Frame(self, padding=(16, 8, 16, 16))
+        body.pack(fill=tk.BOTH, expand=True)
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(1, weight=1)
+
+        ttk.Label(body, text="Evolution", style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(body, text="Target", style="Title.TLabel").grid(row=0, column=1, sticky="w", padx=(12, 0))
+
+        self.evolution_label = ttk.Label(body, anchor=tk.CENTER, background="#151515")
+        self.evolution_label.grid(row=1, column=0, sticky="nsew", pady=(8, 0), padx=(0, 6))
+
+        self.target_label = ttk.Label(body, anchor=tk.CENTER, background="#151515")
+        self.target_label.grid(row=1, column=1, sticky="nsew", pady=(8, 0), padx=(6, 0))
+
+        status = ttk.Label(self, textvariable=self.status_var, style="Status.TLabel", padding=(16, 0, 16, 14))
+        status.pack(fill=tk.X)
+
+    def _choose_image(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Choose an image",
+            filetypes=(
+                ("Images", "*.png *.jpg *.jpeg *.bmp *.gif *.webp"),
+                ("All files", "*.*"),
+            ),
+        )
+        if not path:
+            return
+
+        self._stop_evolving()
+        self.image_path = Path(path)
+        self.best_image = None
+        self.session = None
+        self.save_button.configure(state=tk.DISABLED)
+        self.start_button.configure(state=tk.NORMAL)
+        self._show_target(self.image_path)
+        self.evolution_label.configure(image="", text="")
+        self.status_var.set(f"Ready: {self.image_path.name}")
+
+    def _start_evolving(self) -> None:
+        if self.image_path is None:
+            messagebox.showinfo("Choose an image", "Choose an image before starting.")
+            return
+        if self.worker and self.worker.is_alive():
+            return
+
+        assert self.image_path is not None
+        self.run_id += 1
+        run_id = self.run_id
+        image_path = self.image_path
+        self.stop_event.clear()
+        self.start_button.configure(state=tk.DISABLED)
+        self.stop_button.configure(state=tk.NORMAL)
+        self.save_button.configure(state=tk.DISABLED)
+        self.status_var.set("Starting evolution...")
+
+        mode = self.mode_var.get()
+        shape = self.shape_var.get()
+        downsample = max(1, self.downsample_var.get())
+        self.worker = threading.Thread(
+            target=self._run_worker,
+            args=(run_id, image_path, mode, shape, downsample),
+            daemon=True,
+        )
+        self.worker.start()
+
+    def _run_worker(self, run_id: int, image_path: Path, mode: str, shape: str, downsample: int) -> None:
+        try:
+            config = Config(
+                mode=mode,  # type: ignore[arg-type]
+                shape_mode=shape,  # type: ignore[arg-type]
+                pop_size=24,
+                nb_elite=5,
+                nb_elements_initial=18,
+                nb_elements_max=140,
+                min_triangles=5,
+                hill_climb_interval=75,
+                hill_climb_attempts=1,
+                max_workers=1,
+                enable_logging=False,
+            )
+            session = EvolutionSession(str(image_path), config, downsample=downsample)
+            self.session = session
+
+            last_render = 0.0
+            while not self.stop_event.is_set():
+                snapshot = session.step_many(4)
+                now = time.monotonic()
+                if snapshot.improved or now - last_render >= 0.25:
+                    self.updates.put(WorkerUpdate(run_id=run_id, snapshot=snapshot, rendered=session.render_best()))
+                    last_render = now
+        except Exception as exc:
+            self.updates.put(WorkerError(run_id=run_id, error=exc))
+
+    def _poll_updates(self) -> None:
+        try:
+            while True:
+                update = self.updates.get_nowait()
+                if isinstance(update, WorkerError):
+                    if update.run_id != self.run_id:
+                        continue
+                    self._stop_evolving()
+                    messagebox.showerror("Evolution failed", str(update.error))
+                    self.status_var.set("Evolution stopped after an error.")
+                    continue
+                if update.run_id != self.run_id:
+                    continue
+                self.best_image = update.rendered
+                self._show_evolution(update.rendered)
+                self.save_button.configure(state=tk.NORMAL)
+                self.status_var.set(
+                    "Iteration {0.iteration} | Best {0.best_fitness:.6f} | "
+                    "Current {0.current_fitness:.6f} | Shapes {0.shape_count}".format(update.snapshot)
+                )
+        except queue.Empty:
+            pass
+        finally:
+            if self.worker and not self.worker.is_alive():
+                self.start_button.configure(state=tk.NORMAL if self.image_path else tk.DISABLED)
+                self.stop_button.configure(state=tk.DISABLED)
+            self.after(80, self._poll_updates)
+
+    def _stop_evolving(self) -> None:
+        self.stop_event.set()
+        self.stop_button.configure(state=tk.DISABLED)
+        if self.image_path is not None:
+            self.start_button.configure(state=tk.NORMAL)
+
+    def _save_best(self) -> None:
+        if self.best_image is None:
+            return
+        mode = "color" if self.best_image.ndim == 3 else "grayscale"
+        path = filedialog.asksaveasfilename(
+            title="Save best image",
+            defaultextension=".png",
+            filetypes=(("PNG", "*.png"), ("JPEG", "*.jpg *.jpeg"), ("All files", "*.*")),
+        )
+        if not path:
+            return
+        save_image(self.best_image, path, mode)
+        self.status_var.set(f"Saved {Path(path).name}")
+
+    def _show_target(self, path: Path) -> None:
+        image = Image.open(path).convert("RGB")
+        self.target_photo = self._photo_for_panel(image)
+        self.target_label.configure(image=self.target_photo, text="")
+
+    def _show_evolution(self, array: np.ndarray) -> None:
+        if array.ndim == 2:
+            image = Image.fromarray(array, mode="L").convert("RGB")
+        else:
+            image = Image.fromarray(array, mode="RGB")
+        self.evolution_photo = self._photo_for_panel(image)
+        self.evolution_label.configure(image=self.evolution_photo, text="")
+
+    def _photo_for_panel(self, image: Image.Image) -> ImageTk.PhotoImage:
+        image = image.copy()
+        image.thumbnail((CANVAS_WIDTH, CANVAS_HEIGHT), Image.Resampling.LANCZOS)
+        return ImageTk.PhotoImage(image)
+
+    def _on_close(self) -> None:
+        self._stop_evolving()
+        self.destroy()
+
+
+def main() -> int:
+    app = TriangleImageApp()
+    app.mainloop()
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())
