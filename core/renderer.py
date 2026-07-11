@@ -249,7 +249,7 @@ def render_voronoi_float(
 ) -> np.ndarray:
     width, height = individual.width, individual.height
     mode = individual.mode
-    sites = [shape for shape in individual.triangles if isinstance(shape, VoronoiSite)]
+    sites = [shape for shape in individual.shapes if isinstance(shape, VoronoiSite)]
     canvas = new_canvas(width, height, mode, background)
     if not sites:
         return canvas
@@ -307,7 +307,7 @@ def _render_incremental(
         or individual._compositing_cache_signature
         != _render_cache_signature(individual, config, background)
         or config.shape_mode == "voronoi"
-        or any(isinstance(shape, VoronoiSite) for shape in individual.triangles)
+        or any(isinstance(shape, VoronoiSite) for shape in individual.shapes)
     ):
         return None
 
@@ -344,10 +344,10 @@ def _render_incremental(
 
     backend = resolve_renderer_backend(config.renderer_backend, region.size, config)
     if backend == "numpy":
-        for index in range(prefix_index + 1, len(individual.triangles)):
+        for index in range(prefix_index + 1, len(individual.shapes)):
             composite_shape_region(
                 region,
-                individual.triangles[index],
+                individual.shapes[index],
                 width,
                 height,
                 individual.mode,
@@ -381,10 +381,10 @@ def _render_incremental(
                     individual.mode,
                     background,
                 )
-            for index in range(prefix_index + 1, len(individual.triangles)):
+            for index in range(prefix_index + 1, len(individual.shapes)):
                 composite_shape_region(
                     region,
-                    individual.triangles[index],
+                    individual.shapes[index],
                     width,
                     height,
                     individual.mode,
@@ -394,10 +394,10 @@ def _render_incremental(
 
     canvas = base_render.copy()
     canvas[min_y : max_y + 1, min_x : max_x + 1] = region
-    if len(cache) < len(individual.triangles):
-        cache.extend([None] * (len(individual.triangles) - len(cache)))
-    elif len(cache) > len(individual.triangles):
-        del cache[len(individual.triangles) :]
+    if len(cache) < len(individual.shapes):
+        cache.extend([None] * (len(individual.shapes) - len(cache)))
+    elif len(cache) > len(individual.shapes):
+        del cache[len(individual.shapes) :]
     if cache:
         cache[-1] = canvas
 
@@ -431,10 +431,10 @@ def _render_individual_full(
     cache = individual._compositing_cache if config.use_compositing_cache else []
 
     is_voronoi = config.shape_mode == "voronoi" or any(
-        isinstance(shape, VoronoiSite) for shape in individual.triangles
+        isinstance(shape, VoronoiSite) for shape in individual.shapes
     )
     if is_voronoi:
-        final_index = len(individual.triangles) - 1
+        final_index = len(individual.shapes) - 1
         if (
             cache
             and final_index >= 0
@@ -463,7 +463,7 @@ def _render_individual_full(
                     logging.warning("%s renderer failed; using NumPy: %s", backend, exc)
                 canvas = render_voronoi_float(individual, background)
         if config.use_compositing_cache:
-            cache = [None] * len(individual.triangles)
+            cache = [None] * len(individual.shapes)
             if final_index >= 0:
                 cache[final_index] = canvas
             individual._compositing_cache = cache
@@ -472,7 +472,7 @@ def _render_individual_full(
 
     cached_index = -1
     if cache:
-        max_cache_index = min(len(cache), len(individual.triangles)) - 1
+        max_cache_index = min(len(cache), len(individual.shapes)) - 1
         for index in range(max_cache_index, -1, -1):
             if cache[index] is not None:
                 cached_index = index
@@ -481,32 +481,32 @@ def _render_individual_full(
     if cached_index >= 0:
         cached = cache[cached_index]
         assert cached is not None
-        if cached_index == len(individual.triangles) - 1:
+        if cached_index == len(individual.shapes) - 1:
             return cached
         canvas = cached.copy()
     else:
         canvas = new_canvas(width, height, mode, background)
         if config.use_compositing_cache:
-            cache = [None] * len(individual.triangles)
+            cache = [None] * len(individual.shapes)
 
     if config.use_compositing_cache:
-        if len(cache) < len(individual.triangles):
-            cache.extend([None] * (len(individual.triangles) - len(cache)))
-        elif len(cache) > len(individual.triangles):
-            del cache[len(individual.triangles) :]
+        if len(cache) < len(individual.shapes):
+            cache.extend([None] * (len(individual.shapes) - len(cache)))
+        elif len(cache) > len(individual.shapes):
+            del cache[len(individual.shapes) :]
 
-    final_index = len(individual.triangles) - 1
+    final_index = len(individual.shapes) - 1
     max_cache_bytes = int(config.compositing_cache_max_mb * 1024 * 1024)
     max_checkpoints = max(1, max_cache_bytes // max(1, canvas.nbytes))
     budget_stride = max(
         1,
-        (len(individual.triangles) + max_checkpoints - 1) // max_checkpoints,
+        (len(individual.shapes) + max_checkpoints - 1) // max_checkpoints,
     )
     stride = max(config.compositing_cache_stride, budget_stride)
     backend = resolve_renderer_backend(config.renderer_backend, canvas.size, config)
     if backend == "numpy":
-        for index in range(cached_index + 1, len(individual.triangles)):
-            composite_shape(canvas, individual.triangles[index], width, height, mode, config)
+        for index in range(cached_index + 1, len(individual.shapes)):
+            composite_shape(canvas, individual.shapes[index], width, height, mode, config)
             should_cache = index == final_index or (index + 1) % stride == 0
             if config.use_compositing_cache and should_cache:
                 cache[index] = canvas if index == final_index else canvas.copy()
@@ -534,8 +534,8 @@ def _render_individual_full(
                 canvas = cached.copy()
             else:
                 canvas = new_canvas(width, height, mode, background)
-            for index in range(cached_index + 1, len(individual.triangles)):
-                composite_shape(canvas, individual.triangles[index], width, height, mode, config)
+            for index in range(cached_index + 1, len(individual.shapes)):
+                composite_shape(canvas, individual.shapes[index], width, height, mode, config)
                 should_cache = index == final_index or (index + 1) % stride == 0
                 if config.use_compositing_cache and should_cache:
                     cache[index] = canvas if index == final_index else canvas.copy()

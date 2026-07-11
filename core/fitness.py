@@ -84,7 +84,7 @@ def evaluate_fitness(
 
     individual._pixel_error_sum = error_sum
     normalized_error = error_sum / (reference.size * 255.0**2)
-    fitness = normalized_error + shape_penalty(len(individual.triangles), config)
+    fitness = normalized_error + shape_penalty(len(individual.shapes), config)
     individual.fitness = fitness
     return fitness
 

@@ -529,7 +529,7 @@ class Individual:
     width: int
     height: int
     mode: ColorMode
-    triangles: list[Shape] = field(default_factory=list)
+    shapes: list[Shape] = field(default_factory=list)
     fitness: float = float("inf")
     _compositing_cache: list[np.ndarray | None] = field(default_factory=list, repr=False)
     _compositing_cache_signature: tuple[object, ...] | None = field(default=None, repr=False)
@@ -544,7 +544,7 @@ class Individual:
             width=self.width,
             height=self.height,
             mode=self.mode,
-            triangles=[t.copy() for t in self.triangles],
+            shapes=[shape.copy() for shape in self.shapes],
             fitness=self.fitness,
             _compositing_cache=list(self._compositing_cache),
             _compositing_cache_signature=self._compositing_cache_signature,
@@ -561,7 +561,7 @@ class Individual:
             width=self.width,
             height=self.height,
             mode=self.mode,
-            triangles=[shape.fork() for shape in self.triangles],
+            shapes=[shape.fork() for shape in self.shapes],
             fitness=self.fitness,
             _compositing_cache=list(self._compositing_cache),
             _compositing_cache_signature=self._compositing_cache_signature,
@@ -569,7 +569,7 @@ class Individual:
         )
 
     def _cached_final_render(self) -> np.ndarray | None:
-        if len(self._compositing_cache) != len(self.triangles) or not self._compositing_cache:
+        if len(self._compositing_cache) != len(self.shapes) or not self._compositing_cache:
             return None
         return self._compositing_cache[-1]
 
@@ -609,12 +609,12 @@ class Individual:
         self._pixel_error_sum = None
         self._clear_dirty_tracking()
         if include_shape_masks:
-            for shape in self.triangles:
+            for shape in self.shapes:
                 shape.invalidate_caches()
 
-    def ensure_min_triangles(self, config: Config, guide: EvolutionGuide | None = None) -> bool:
+    def ensure_min_shapes(self, config: Config, guide: EvolutionGuide | None = None) -> bool:
         added = False
-        while len(self.triangles) < config.min_triangles:
+        while len(self.shapes) < config.min_shapes:
             shape = random_shape(
                 self.width,
                 self.height,
@@ -623,15 +623,15 @@ class Individual:
                 config,
                 guide,
             )
-            self._mark_dirty(len(self.triangles), shape.bounding_box(self.width, self.height))
-            self.triangles.append(shape)
+            self._mark_dirty(len(self.shapes), shape.bounding_box(self.width, self.height))
+            self.shapes.append(shape)
             added = True
         if added:
             self.fitness = float("inf")
         return added
 
-    def add_random_triangle(self, config: Config, guide: EvolutionGuide | None = None) -> bool:
-        if len(self.triangles) >= config.nb_elements_max:
+    def add_random_shape(self, config: Config, guide: EvolutionGuide | None = None) -> bool:
+        if len(self.shapes) >= config.nb_elements_max:
             return False
         shape = random_shape(
             self.width,
@@ -641,36 +641,36 @@ class Individual:
             config,
             guide,
         )
-        self._mark_dirty(len(self.triangles), shape.bounding_box(self.width, self.height))
-        self.triangles.append(shape)
+        self._mark_dirty(len(self.shapes), shape.bounding_box(self.width, self.height))
+        self.shapes.append(shape)
         self.fitness = float("inf")
         return True
 
-    def remove_random_triangle(self, config: Config) -> bool:
-        if len(self.triangles) <= config.min_triangles:
+    def remove_random_shape(self, config: Config) -> bool:
+        if len(self.shapes) <= config.min_shapes:
             return False
-        idx = random.randint(0, len(self.triangles) - 1)
-        self._mark_dirty(idx, self.triangles[idx].bounding_box(self.width, self.height))
-        del self.triangles[idx]
+        idx = random.randint(0, len(self.shapes) - 1)
+        self._mark_dirty(idx, self.shapes[idx].bounding_box(self.width, self.height))
+        del self.shapes[idx]
         self.invalidate_cache_from(idx)
         self.fitness = float("inf")
         return True
 
     def _mutate_random_shape(self, config: Config, rate: float) -> bool:
-        if not self.triangles:
+        if not self.shapes:
             return False
-        idx = random.randint(0, len(self.triangles) - 1)
-        old_bbox = self.triangles[idx].bounding_box(self.width, self.height)
+        idx = random.randint(0, len(self.shapes) - 1)
+        old_bbox = self.shapes[idx].bounding_box(self.width, self.height)
         self._mark_dirty(idx, old_bbox)
         mutate_shape(
-            self.triangles[idx],
+            self.shapes[idx],
             self.width,
             self.height,
             self.mode,
             config,
             rate,
         )
-        self._mark_dirty(idx, self.triangles[idx].bounding_box(self.width, self.height))
+        self._mark_dirty(idx, self.shapes[idx].bounding_box(self.width, self.height))
         self.invalidate_cache_from(idx)
         self.fitness = float("inf")
         return True
@@ -682,26 +682,26 @@ class Individual:
         guide: EvolutionGuide | None = None,
     ) -> None:
         effective_rate = config.mutation_rate if rate is None else rate
-        self.ensure_min_triangles(config, guide)
+        self.ensure_min_shapes(config, guide)
         operations = max(1, int(round(config.mutation_operations * effective_rate)))
 
         for _ in range(operations):
             roll = random.random()
             if roll < config.prob_structural:
                 if random.random() < config.prob_add_vs_del:
-                    changed = self.add_random_triangle(config, guide)
+                    changed = self.add_random_shape(config, guide)
                 else:
-                    changed = self.remove_random_triangle(config)
+                    changed = self.remove_random_shape(config)
                 if not changed:
                     self._mutate_random_shape(config, effective_rate)
-            elif roll < config.prob_structural + config.prob_reorder and len(self.triangles) >= 2:
-                i, j = random.sample(range(len(self.triangles)), 2)
-                self._mark_dirty(i, self.triangles[i].bounding_box(self.width, self.height))
-                self._mark_dirty(j, self.triangles[j].bounding_box(self.width, self.height))
-                self.triangles[i], self.triangles[j] = self.triangles[j], self.triangles[i]
+            elif roll < config.prob_structural + config.prob_reorder and len(self.shapes) >= 2:
+                i, j = random.sample(range(len(self.shapes)), 2)
+                self._mark_dirty(i, self.shapes[i].bounding_box(self.width, self.height))
+                self._mark_dirty(j, self.shapes[j].bounding_box(self.width, self.height))
+                self.shapes[i], self.shapes[j] = self.shapes[j], self.shapes[i]
                 self.invalidate_cache_from(min(i, j))
                 self.fitness = float("inf")
-            elif self.triangles:
+            elif self.shapes:
                 self._mutate_random_shape(config, effective_rate)
 
     @classmethod
@@ -716,7 +716,7 @@ class Individual:
     ) -> Individual:
         ind = cls(width=width, height=height, mode=mode)
         for _ in range(count):
-            ind.triangles.append(random_shape(width, height, mode, config.shape_mode, config, guide))
+            ind.shapes.append(random_shape(width, height, mode, config.shape_mode, config, guide))
         return ind
 
     @classmethod
@@ -728,21 +728,21 @@ class Individual:
         guide: EvolutionGuide | None = None,
     ) -> Individual:
         child_count = random.randint(
-            min(len(parent_a.triangles), len(parent_b.triangles)),
-            min(config.nb_elements_max, max(len(parent_a.triangles), len(parent_b.triangles))),
+            min(len(parent_a.shapes), len(parent_b.shapes)),
+            min(config.nb_elements_max, max(len(parent_a.shapes), len(parent_b.shapes))),
         )
-        child_count = max(config.min_triangles, child_count)
+        child_count = max(config.min_shapes, child_count)
         child = cls(width=parent_a.width, height=parent_a.height, mode=parent_a.mode)
         for i in range(child_count):
-            if i < len(parent_a.triangles) and i < len(parent_b.triangles):
+            if i < len(parent_a.shapes) and i < len(parent_b.shapes):
                 source = parent_a if random.random() < 0.5 else parent_b
-                child.triangles.append(source.triangles[i].copy())
-            elif i < len(parent_a.triangles):
-                child.triangles.append(parent_a.triangles[i].copy())
-            elif i < len(parent_b.triangles):
-                child.triangles.append(parent_b.triangles[i].copy())
+                child.shapes.append(source.shapes[i].copy())
+            elif i < len(parent_a.shapes):
+                child.shapes.append(parent_a.shapes[i].copy())
+            elif i < len(parent_b.shapes):
+                child.shapes.append(parent_b.shapes[i].copy())
             else:
-                child.triangles.append(
+                child.shapes.append(
                     random_shape(
                         parent_a.width,
                         parent_a.height,
@@ -752,7 +752,7 @@ class Individual:
                         guide,
                     )
                 )
-        child.ensure_min_triangles(config, guide)
+        child.ensure_min_shapes(config, guide)
         return child
 
     @classmethod
@@ -764,28 +764,28 @@ class Individual:
         guide: EvolutionGuide | None = None,
     ) -> Individual:
         count = random.randint(
-            min(len(parent_a.triangles), len(parent_b.triangles)),
-            min(config.nb_elements_max, max(len(parent_a.triangles), len(parent_b.triangles))),
+            min(len(parent_a.shapes), len(parent_b.shapes)),
+            min(config.nb_elements_max, max(len(parent_a.shapes), len(parent_b.shapes))),
         )
-        count = max(config.min_triangles, count)
+        count = max(config.min_shapes, count)
         child = cls(width=parent_a.width, height=parent_a.height, mode=parent_a.mode)
         for i in range(count):
-            if i < len(parent_a.triangles) and i < len(parent_b.triangles):
-                child.triangles.append(
+            if i < len(parent_a.shapes) and i < len(parent_b.shapes):
+                child.shapes.append(
                     blend_shapes(
-                        parent_a.triangles[i],
-                        parent_b.triangles[i],
+                        parent_a.shapes[i],
+                        parent_b.shapes[i],
                         parent_a.width,
                         parent_a.height,
                         parent_a.mode,
                         config,
                     )
                 )
-            elif i < len(parent_a.triangles):
-                child.triangles.append(parent_a.triangles[i].copy())
+            elif i < len(parent_a.shapes):
+                child.shapes.append(parent_a.shapes[i].copy())
             else:
-                child.triangles.append(parent_b.triangles[i].copy())
-        child.ensure_min_triangles(config, guide)
+                child.shapes.append(parent_b.shapes[i].copy())
+        child.ensure_min_shapes(config, guide)
         return child
 
 
@@ -802,7 +802,7 @@ def scale_individual(individual: Individual, width: int, height: int) -> Individ
 
     radius_scale = min(width / individual.width, height / individual.height)
     shapes: list[Shape] = []
-    for shape in individual.triangles:
+    for shape in individual.shapes:
         if isinstance(shape, Triangle):
             points = np.empty_like(shape.points)
             for index, point in enumerate(shape.points):
@@ -844,6 +844,6 @@ def scale_individual(individual: Individual, width: int, height: int) -> Individ
         width=width,
         height=height,
         mode=individual.mode,
-        triangles=shapes,
+        shapes=shapes,
         fitness=float("inf"),
     )

@@ -3,12 +3,26 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-from core.paths import OUTPUT_DIR
-
-
 ColorMode = Literal["grayscale", "color"]
 ShapeMode = Literal["triangle", "circle", "square", "voronoi", "mixed"]
 RendererBackend = Literal["auto", "numpy", "numba", "cuda"]
+
+RUNTIME_CONFIG_FIELDS = frozenset(
+    {
+        "enable_logging",
+        "log_interval_sec",
+        "log_level",
+        "max_workers",
+        "parallel_min_pixels",
+        "renderer_backend",
+        "use_dirty_regions",
+        "numba_min_pixels",
+        "cuda_min_pixels",
+        "use_compositing_cache",
+        "compositing_cache_stride",
+        "compositing_cache_max_mb",
+    }
+)
 
 
 @dataclass
@@ -21,7 +35,7 @@ class Config:
     nb_elite: int = 6
     nb_elements_initial: int = 15
     nb_elements_max: int = 150
-    min_triangles: int = 5
+    min_shapes: int = 5
 
     # Mutation
     mutation_rate: float = 1.0
@@ -46,7 +60,7 @@ class Config:
     target_guidance_candidates: int = 24
 
     # Rendering
-    fixed_alpha: float = -1.0  # <0 uses per-triangle alpha
+    fixed_alpha: float = -1.0  # <0 uses each shape's alpha
     alpha_min: int = 10
     alpha_max: int = 255
     gaussian_blur_sigma: float = 0.0
@@ -73,11 +87,6 @@ class Config:
     max_workers: int = 0  # 0 = auto, capped at four cache-preserving threads
     parallel_min_pixels: int = 500_000  # counts channel values, not just width * height
 
-    # I/O
-    save_directory: str = str(OUTPUT_DIR)
-    save_comparison: bool = True
-    gif_frame_duration_ms: int = 200
-
     # Logging
     enable_logging: bool = True
     log_interval_sec: float = 10.0
@@ -97,10 +106,10 @@ class Config:
             raise ValueError("nb_elements_initial must be at least 1")
         if self.nb_elements_max < self.nb_elements_initial:
             raise ValueError("nb_elements_max must be greater than or equal to nb_elements_initial")
-        if self.min_triangles < 1:
-            raise ValueError("min_triangles must be at least 1")
-        if self.nb_elements_max < self.min_triangles:
-            raise ValueError("nb_elements_max must be greater than or equal to min_triangles")
+        if self.min_shapes < 1:
+            raise ValueError("min_shapes must be at least 1")
+        if self.nb_elements_max < self.min_shapes:
+            raise ValueError("nb_elements_max must be greater than or equal to min_shapes")
         if self.max_workers < 0:
             raise ValueError("max_workers must be 0 or greater")
         if self.parallel_min_pixels < 1:

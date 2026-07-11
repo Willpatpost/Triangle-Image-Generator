@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 import random
+import json
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -24,7 +25,7 @@ from core.evolver import EvolutionSession
 from core.fitness import evaluate_fitness, evaluate_population, normalized_mse, shape_penalty
 from core.genetic import next_generation
 from core.guidance import EvolutionGuide
-from core.io import load_state, save_state
+from core.io import load_state, read_state, save_state
 from core.pipeline import run_evolution, run_progressive_evolution
 from core.renderer import (
     new_canvas,
@@ -91,7 +92,7 @@ class FitnessTests(unittest.TestCase):
         self.assertAlmostEqual(normalized_mse(small_ref, small_rendered), 1.0)
         self.assertAlmostEqual(normalized_mse(large_ref, large_rendered), 1.0)
 
-    def test_shape_penalty_increases_with_triangle_count(self) -> None:
+    def test_shape_penalty_increases_with_shape_count(self) -> None:
         config = Config(shape_penalty_weight=0.01, nb_elements_max=100)
 
         self.assertLess(shape_penalty(10, config), shape_penalty(50, config))
@@ -103,7 +104,7 @@ class FitnessTests(unittest.TestCase):
                 width=4,
                 height=4,
                 mode="grayscale",
-                triangles=[
+                shapes=[
                     Triangle(
                         points=np.array([[0, 0], [3, 0], [0, 3]], dtype=np.int32),
                         color=color,
@@ -119,7 +120,7 @@ class FitnessTests(unittest.TestCase):
             nb_elite=1,
             nb_elements_initial=1,
             nb_elements_max=2,
-            min_triangles=1,
+            min_shapes=1,
         )
 
         ranked = evaluate_population(population, np.zeros((4, 4), dtype=np.uint8), config, 0)
@@ -129,7 +130,7 @@ class FitnessTests(unittest.TestCase):
         for index, individual in enumerate(population):
             if index != best_index:
                 self.assertEqual(individual._compositing_cache, [])
-                self.assertIsNone(individual.triangles[0]._mask_cache)
+                self.assertIsNone(individual.shapes[0]._mask_cache)
 
     def test_dirty_region_render_and_fitness_match_full_recompute(self) -> None:
         reference = np.random.default_rng(7).integers(0, 256, (20, 24, 3), dtype=np.uint8)
@@ -137,7 +138,7 @@ class FitnessTests(unittest.TestCase):
             width=24,
             height=20,
             mode="color",
-            triangles=[
+            shapes=[
                 Triangle(
                     points=np.array([[1, 1], [20, 2], [4, 17]], dtype=np.int32),
                     color=(30, 80, 210),
@@ -164,7 +165,7 @@ class FitnessTests(unittest.TestCase):
             nb_elite=1,
             nb_elements_initial=3,
             nb_elements_max=8,
-            min_triangles=1,
+            min_shapes=1,
             renderer_backend="numpy",
             compositing_cache_stride=1,
         )
@@ -172,7 +173,7 @@ class FitnessTests(unittest.TestCase):
         evaluate_fitness(parent, reference, config, background)
 
         child = parent.fork()
-        circle = child.triangles[1]
+        circle = child.shapes[1]
         assert isinstance(circle, Circle)
         child._mark_dirty(1, circle.bounding_box(child.width, child.height))
         circle.center = circle.center.copy()
@@ -207,7 +208,7 @@ class FitnessTests(unittest.TestCase):
 
         removed = parent.fork()
         with patch("core.shapes.random.randint", return_value=1):
-            self.assertTrue(removed.remove_random_triangle(config))
+            self.assertTrue(removed.remove_random_shape(config))
         removed_full = removed.copy()
         removed_full.clear_caches()
         removed_result = render_individual_for_scoring(removed.copy(), config, background)
@@ -234,7 +235,7 @@ class AccelerationTests(unittest.TestCase):
             width=24,
             height=18,
             mode="color",
-            triangles=[
+            shapes=[
                 Triangle(
                     points=np.array([[1, 2], [20, 4], [6, 16]], dtype=np.int32),
                     color=(20, 100, 220),
@@ -278,7 +279,7 @@ class AccelerationTests(unittest.TestCase):
             width=8,
             height=8,
             mode="grayscale",
-            triangles=[
+            shapes=[
                 Square(top_left=np.array([1, 1], dtype=np.int32), side=4, color=30, alpha=190)
             ],
         )
@@ -378,7 +379,7 @@ class AccelerationTests(unittest.TestCase):
             width=12,
             height=8,
             mode="color",
-            triangles=[
+            shapes=[
                 VoronoiSite(point=np.array([0, 0], dtype=np.int32), color=(10, 20, 30)),
                 VoronoiSite(point=np.array([11, 7], dtype=np.int32), color=(230, 210, 190)),
                 VoronoiSite(point=np.array([6, 2], dtype=np.int32), color=(80, 180, 60)),
@@ -406,7 +407,7 @@ class StateTests(unittest.TestCase):
             width=2,
             height=2,
             mode="color",
-            triangles=[
+            shapes=[
                 Triangle(
                     points=np.array([[0, 0], [1, 0], [0, 1]], dtype=np.int32),
                     color=(10, 20, 30),
@@ -430,22 +431,27 @@ class StateTests(unittest.TestCase):
             )
 
             iteration, fitness, loaded, config, background = load_state(str(path))
+            state = read_state(str(path))
+            temporary_files = list(Path(tmp).glob(".*.tmp"))
 
         self.assertEqual(iteration, 7)
         self.assertEqual(fitness, 0.25)
         self.assertEqual(loaded.width, 2)
         self.assertEqual(loaded.height, 2)
         self.assertEqual(loaded.mode, "color")
-        self.assertEqual(loaded.triangles[0].color, (10, 20, 30))
+        self.assertEqual(loaded.shapes[0].color, (10, 20, 30))
         self.assertEqual(config.mode, "color")
         self.assertEqual(background, (1, 2, 3))
+        self.assertEqual(state.version, 2)
+        self.assertEqual(state.downsample, 2)
+        self.assertEqual(temporary_files, [])
 
     def test_save_load_state_roundtrip_preserves_mixed_shapes(self) -> None:
         individual = Individual(
             width=8,
             height=8,
             mode="grayscale",
-            triangles=[
+            shapes=[
                 Circle(center=np.array([3, 3], dtype=np.int32), radius=2, color=80, alpha=200),
                 Square(top_left=np.array([1, 1], dtype=np.int32), side=3, color=120, alpha=150),
                 Triangle(
@@ -470,11 +476,46 @@ class StateTests(unittest.TestCase):
             )
             _, _, loaded, config, _ = load_state(str(path))
 
-        self.assertIsInstance(loaded.triangles[0], Circle)
-        self.assertIsInstance(loaded.triangles[1], Square)
-        self.assertIsInstance(loaded.triangles[2], Triangle)
-        self.assertIsInstance(loaded.triangles[3], VoronoiSite)
+        self.assertIsInstance(loaded.shapes[0], Circle)
+        self.assertIsInstance(loaded.shapes[1], Square)
+        self.assertIsInstance(loaded.shapes[2], Triangle)
+        self.assertIsInstance(loaded.shapes[3], VoronoiSite)
         self.assertEqual(config.shape_mode, "mixed")
+
+    def test_loads_legacy_triangle_keyed_state(self) -> None:
+        payload = {
+            "iteration": 4,
+            "best_fitness": 0.2,
+            "width": 2,
+            "height": 2,
+            "mode": "grayscale",
+            "background": 255,
+            "config": {"mode": "grayscale", "min_triangles": 2},
+            "triangles": [
+                {
+                    "kind": "square",
+                    "top_left": [0, 0],
+                    "side": 1,
+                    "color": 10,
+                    "alpha": 255,
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            state = read_state(str(path))
+
+        self.assertEqual(state.version, 1)
+        self.assertEqual(state.config.min_shapes, 2)
+        self.assertIsInstance(state.best.shapes[0], Square)
+
+    def test_rejects_state_from_a_newer_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "future.json"
+            path.write_text('{"version": 999}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "newer than"):
+                read_state(str(path))
 
 
 class RendererTests(unittest.TestCase):
@@ -504,7 +545,7 @@ class RendererTests(unittest.TestCase):
             width=8,
             height=8,
             mode="grayscale",
-            triangles=[
+            shapes=[
                 Circle(center=np.array([4, 4], dtype=np.int32), radius=2, color=0, alpha=255),
                 Square(top_left=np.array([0, 0], dtype=np.int32), side=2, color=128, alpha=255),
             ],
@@ -521,7 +562,7 @@ class RendererTests(unittest.TestCase):
             width=1,
             height=1,
             mode="grayscale",
-            triangles=[
+            shapes=[
                 Square(top_left=np.array([0, 0], dtype=np.int32), side=1, color=100, alpha=255)
             ],
         )
@@ -559,7 +600,7 @@ class RendererTests(unittest.TestCase):
             width=6,
             height=2,
             mode="grayscale",
-            triangles=[
+            shapes=[
                 VoronoiSite(point=np.array([0, 0], dtype=np.int32), color=10),
                 VoronoiSite(point=np.array([5, 0], dtype=np.int32), color=240),
             ],
@@ -576,7 +617,7 @@ class RendererTests(unittest.TestCase):
             width=6,
             height=6,
             mode="grayscale",
-            triangles=[
+            shapes=[
                 Square(top_left=np.array([0, 0], dtype=np.int32), side=5, color=200, alpha=255),
                 Square(top_left=np.array([2, 2], dtype=np.int32), side=2, color=50, alpha=255),
             ],
@@ -590,8 +631,8 @@ class RendererTests(unittest.TestCase):
 
         render_individual(individual, cached_config, 255)
         copied = individual.copy()
-        assert isinstance(copied.triangles[1], Square)
-        copied.triangles[1].color = 10
+        assert isinstance(copied.shapes[1], Square)
+        copied.shapes[1].color = 10
         copied.invalidate_cache_from(1)
 
         cached = render_individual(copied, cached_config, 255)
@@ -608,7 +649,7 @@ class RendererTests(unittest.TestCase):
             width=8,
             height=8,
             mode="grayscale",
-            triangles=[
+            shapes=[
                 Square(top_left=np.array([0, 0], dtype=np.int32), side=1, color=i, alpha=128)
                 for i in range(10)
             ],
@@ -630,7 +671,7 @@ class RendererTests(unittest.TestCase):
             width=16,
             height=16,
             mode="grayscale",
-            triangles=[
+            shapes=[
                 Square(top_left=np.array([0, 0], dtype=np.int32), side=1, color=i, alpha=128)
                 for i in range(10)
             ],
@@ -653,28 +694,28 @@ class RendererTests(unittest.TestCase):
             color=0,
             alpha=255,
         )
-        individual = Individual(width=6, height=6, mode="grayscale", triangles=[triangle])
+        individual = Individual(width=6, height=6, mode="grayscale", shapes=[triangle])
         config = Config(mode="grayscale", shape_mode="triangle")
         render_individual(individual, config, 255)
         copied = individual.copy()
 
-        self.assertIs(copied.triangles[0]._mask_cache, triangle._mask_cache)
+        self.assertIs(copied.shapes[0]._mask_cache, triangle._mask_cache)
         mutate_triangle(
-            copied.triangles[0],
+            copied.shapes[0],
             6,
             6,
             "grayscale",
             Config(mode="grayscale", prob_mutate_geometry=1.0),
             1.0,
         )
-        self.assertIsNone(copied.triangles[0]._mask_cache)
+        self.assertIsNone(copied.shapes[0]._mask_cache)
 
     def test_shape_genome_scales_to_finer_resolution(self) -> None:
         individual = Individual(
             width=4,
             height=4,
             mode="grayscale",
-            triangles=[
+            shapes=[
                 Triangle(
                     points=np.array([[0, 0], [3, 0], [0, 3]], dtype=np.int32),
                     color=20,
@@ -692,10 +733,10 @@ class RendererTests(unittest.TestCase):
         self.assertEqual((scaled.width, scaled.height), (8, 8))
         self.assertEqual(scaled.fitness, float("inf"))
         np.testing.assert_array_equal(
-            scaled.triangles[0].points,
+            scaled.shapes[0].points,
             np.array([[0, 0], [7, 0], [0, 7]], dtype=np.int32),
         )
-        np.testing.assert_array_equal(scaled.triangles[3].point, np.array([7, 7], dtype=np.int32))
+        np.testing.assert_array_equal(scaled.shapes[3].point, np.array([7, 7], dtype=np.int32))
 
 
 class GeneticTests(unittest.TestCase):
@@ -704,7 +745,7 @@ class GeneticTests(unittest.TestCase):
             width=8,
             height=8,
             mode="grayscale",
-            triangles=[
+            shapes=[
                 Triangle(
                     points=np.array([[1, 1], [6, 1], [1, 6]], dtype=np.int32),
                     color=80,
@@ -713,18 +754,18 @@ class GeneticTests(unittest.TestCase):
             ],
         )
         render_individual(parent, Config(mode="grayscale"), 255)
-        original_points = parent.triangles[0].points.copy()
+        original_points = parent.shapes[0].points.copy()
         child = parent.fork()
 
-        self.assertIs(child.triangles[0].points, parent.triangles[0].points)
-        self.assertIs(child.triangles[0]._mask_cache, parent.triangles[0]._mask_cache)
+        self.assertIs(child.shapes[0].points, parent.shapes[0].points)
+        self.assertIs(child.shapes[0]._mask_cache, parent.shapes[0]._mask_cache)
 
         child.mutate(
             Config(
                 mode="grayscale",
                 nb_elements_initial=1,
                 nb_elements_max=1,
-                min_triangles=1,
+                min_shapes=1,
                 prob_structural=0.0,
                 prob_reorder=0.0,
                 prob_mutate_geometry=1.0,
@@ -732,10 +773,10 @@ class GeneticTests(unittest.TestCase):
             rate=1.0,
         )
 
-        self.assertIsNot(child.triangles[0].points, parent.triangles[0].points)
-        np.testing.assert_array_equal(parent.triangles[0].points, original_points)
-        self.assertIsNone(child.triangles[0]._mask_cache)
-        self.assertIsNotNone(parent.triangles[0]._mask_cache)
+        self.assertIsNot(child.shapes[0].points, parent.shapes[0].points)
+        np.testing.assert_array_equal(parent.shapes[0].points, original_points)
+        self.assertIsNone(child.shapes[0]._mask_cache)
+        self.assertIsNotNone(parent.shapes[0]._mask_cache)
 
     def test_next_generation_reuses_unchanged_elite_fitness(self) -> None:
         population = [
@@ -743,7 +784,7 @@ class GeneticTests(unittest.TestCase):
                 width=2,
                 height=2,
                 mode="grayscale",
-                triangles=[
+                shapes=[
                     Square(
                         top_left=np.array([0, 0], dtype=np.int32),
                         side=1,
@@ -763,7 +804,7 @@ class GeneticTests(unittest.TestCase):
             nb_elite=1,
             nb_elements_initial=1,
             nb_elements_max=2,
-            min_triangles=1,
+            min_shapes=1,
             prob_structural=0.0,
             prob_reorder=0.0,
             prob_mutate_geometry=0.0,
@@ -788,7 +829,7 @@ class PipelineTests(unittest.TestCase):
                 nb_elite=1,
                 nb_elements_initial=2,
                 nb_elements_max=8,
-                min_triangles=1,
+                min_shapes=1,
                 hill_climb_interval=0,
                 max_workers=1,
             )
@@ -820,9 +861,7 @@ class PipelineTests(unittest.TestCase):
                 nb_elite=1,
                 nb_elements_initial=1,
                 nb_elements_max=1,
-                min_triangles=1,
-                save_directory=tmp,
-                save_comparison=False,
+                min_shapes=1,
                 max_workers=1,
                 fitness_goal=0.0,
                 stagnation_threshold=10,
@@ -854,7 +893,7 @@ class PipelineTests(unittest.TestCase):
                 nb_elite=1,
                 nb_elements_initial=2,
                 nb_elements_max=6,
-                min_triangles=1,
+                min_shapes=1,
                 hill_climb_interval=0,
                 max_workers=1,
             )
@@ -869,6 +908,62 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(rendered.shape, (8, 8))
             self.assertTrue(np.isfinite(fitness))
             self.assertFalse((Path(tmp) / "final.png").exists())
+
+    def test_saved_session_resumes_the_same_evolution_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "target.png"
+            target = np.zeros((8, 8), dtype=np.uint8)
+            target[2:6, 2:6] = 220
+            Image.fromarray(target, mode="L").save(image_path)
+            config = Config(
+                mode="grayscale",
+                shape_mode="mixed",
+                pop_size=4,
+                nb_elite=1,
+                nb_elements_initial=2,
+                nb_elements_max=8,
+                min_shapes=1,
+                hill_climb_interval=0,
+                max_workers=1,
+            )
+            session = EvolutionSession(str(image_path), config, seed=19)
+            session.step_many(3)
+            state_path = Path(tmp) / "session.json"
+            session.save(str(state_path))
+
+            expected = session.step()
+            expected_image = session.render_best()
+            resumed = EvolutionSession.from_state(str(state_path))
+            actual = resumed.step()
+
+            self.assertEqual(actual.iteration, expected.iteration)
+            self.assertEqual(actual.shape_count, expected.shape_count)
+            self.assertAlmostEqual(actual.current_fitness, expected.current_fitness, places=14)
+            self.assertAlmostEqual(actual.best_fitness, expected.best_fitness, places=14)
+            np.testing.assert_array_equal(resumed.render_best(), expected_image)
+
+    def test_session_rejects_a_different_source_image(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.png"
+            other = Path(tmp) / "other.png"
+            Image.fromarray(np.zeros((4, 4), dtype=np.uint8), mode="L").save(source)
+            Image.fromarray(np.full((4, 4), 255, dtype=np.uint8), mode="L").save(other)
+            config = Config(
+                mode="grayscale",
+                pop_size=4,
+                nb_elite=1,
+                nb_elements_initial=1,
+                nb_elements_max=2,
+                min_shapes=1,
+                hill_climb_interval=0,
+                max_workers=1,
+            )
+            session = EvolutionSession(str(source), config, seed=3)
+            state_path = Path(tmp) / "session.json"
+            session.save(str(state_path))
+
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                EvolutionSession.from_state(str(state_path), image_path=str(other))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "genetic-shape-image-generator"
+version = "0.1.0"
+description = "Approximate images with an optimized genetic algorithm and primitive shapes."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+acceleration = ["numba>=0.61"]
+dev = ["build>=1.2"]
+
+[project.gui-scripts]
+genetic-shape-image = "app:main"
+
+[project.urls]
+Repository = "https://github.com/Willpatpost/Triangle-Image-Generator"
+
+[tool.setuptools]
+packages = ["core"]
+py-modules = ["app"]

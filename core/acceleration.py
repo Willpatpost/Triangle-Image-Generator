@@ -155,14 +155,14 @@ def resolve_renderer_backend(
 
 
 def encode_shapes(individual: Individual, config: Config) -> EncodedShapes:
-    count = len(individual.triangles)
+    count = len(individual.shapes)
     kinds = np.empty(count, dtype=np.int8)
     geometry = np.zeros((count, 6), dtype=np.int32)
     bounds = np.empty((count, 4), dtype=np.int32)
     colors = np.zeros((count, 3), dtype=np.float32)
     alphas = np.empty(count, dtype=np.float32)
 
-    for index, shape in enumerate(individual.triangles):
+    for index, shape in enumerate(individual.shapes):
         if isinstance(shape, Triangle):
             kinds[index] = 0
             geometry[index] = shape.points.reshape(6)

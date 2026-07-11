@@ -8,35 +8,17 @@ from dataclasses import replace
 
 import numpy as np
 
-from core.config import Config
+from core.config import Config, RUNTIME_CONFIG_FIELDS
 from core.fitness import evaluate_population_parallel
 from core.genetic import create_initial_population, hill_climb_elite, next_generation
 from core.guidance import EvolutionGuide
 from core.io import (
+    file_sha256,
     load_reference_image,
-    load_state,
+    read_state,
     save_image,
 )
 from core.renderer import render_individual, render_individual_float
-
-
-RUNTIME_CONFIG_FIELDS = {
-    "save_directory",
-    "save_comparison",
-    "gif_frame_duration_ms",
-    "enable_logging",
-    "log_interval_sec",
-    "log_level",
-    "max_workers",
-    "parallel_min_pixels",
-    "renderer_backend",
-    "use_dirty_regions",
-    "numba_min_pixels",
-    "cuda_min_pixels",
-    "use_compositing_cache",
-    "compositing_cache_stride",
-    "compositing_cache_max_mb",
-}
 
 
 def setup_logging(level: str, enabled: bool) -> None:
@@ -76,7 +58,14 @@ def run_evolution(
     start_iteration = 0
     resume_individual = None
     if resume_path and os.path.isfile(resume_path):
-        start_iteration, resume_fitness, resume_individual, loaded_config, loaded_bg = load_state(resume_path)
+        state = read_state(resume_path)
+        if state.source_sha256 and file_sha256(image_path) != state.source_sha256:
+            raise ValueError("The reference image does not match the image saved with this session.")
+        start_iteration = state.iteration + (1 if state.version == 1 else 0)
+        resume_fitness = state.best_fitness
+        resume_individual = state.best
+        loaded_config = state.config
+        loaded_bg = state.background
         runtime_overrides = {
             field: getattr(config, field)
             for field in RUNTIME_CONFIG_FIELDS
@@ -84,7 +73,6 @@ def run_evolution(
         config = replace(loaded_config, **runtime_overrides)
         config.validate()
         logging.info("Resumed from iteration %d (fitness %.6f)", start_iteration, resume_fitness)
-        start_iteration += 1
 
     reference, background = load_reference_image(
         image_path,
@@ -178,9 +166,9 @@ def run_evolution(
 
         if time.time() - last_log_time >= config.log_interval_sec:
             logging.info(
-                "Iteration %d | triangles %d | current %.6f | best %.6f | mutation %.2f",
+                "Iteration %d | shapes %d | current %.6f | best %.6f | mutation %.2f",
                 iteration,
-                len(population[best_index].triangles),
+                len(population[best_index].shapes),
                 current_best_fitness,
                 global_best.fitness,
                 mutation_rate,

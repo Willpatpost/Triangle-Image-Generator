@@ -1,4 +1,4 @@
-"""Core library for triangle-based genetic image approximation."""
+"""Core library for genetic image approximation with primitive shapes."""
 
 from core.acceleration import (
     AccelerationStatus,
@@ -8,11 +8,13 @@ from core.acceleration import (
 )
 from core.config import Config
 from core.evolver import EvolutionSession, EvolutionSnapshot
+from core.io import EvolutionState
 
 __all__ = [
     "Config",
     "EvolutionSession",
     "EvolutionSnapshot",
+    "EvolutionState",
     "AccelerationStatus",
     "AcceleratorUnavailable",
     "acceleration_status",
