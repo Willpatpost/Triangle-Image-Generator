@@ -15,7 +15,17 @@ from core.fitness import normalized_mse, shape_penalty
 from core.io import load_state, save_state
 from core.pipeline import run_evolution
 from core.renderer import render_individual
-from core.shapes import Circle, Individual, Square, Triangle, VoronoiSite, mutate_triangle
+from core.shapes import (
+    Circle,
+    Individual,
+    Square,
+    Triangle,
+    VoronoiSite,
+    mutate_triangle,
+    random_circle,
+    random_square,
+    random_triangle,
+)
 
 
 class ConfigTests(unittest.TestCase):
@@ -37,6 +47,8 @@ class ConfigTests(unittest.TestCase):
             Config(alpha_min=200, alpha_max=100).validate()
         with self.assertRaises(ValueError):
             Config(fixed_alpha=1.1).validate()
+        with self.assertRaises(ValueError):
+            Config(new_shape_size_divisor=0.5).validate()
 
 
 class FitnessTests(unittest.TestCase):
@@ -134,6 +146,19 @@ class StateTests(unittest.TestCase):
 
 
 class RendererTests(unittest.TestCase):
+    def test_random_shapes_use_size_divisor(self) -> None:
+        random.seed(2)
+        config = Config(mode="grayscale", new_shape_size_divisor=5.0)
+        triangle = random_triangle(100, 100, "grayscale", config)
+        circle = random_circle(100, 100, "grayscale", config)
+        square = random_square(100, 100, "grayscale", config)
+
+        min_x, min_y, max_x, max_y = triangle.bounding_box(100, 100)
+        self.assertLessEqual(max_x - min_x, 40)
+        self.assertLessEqual(max_y - min_y, 40)
+        self.assertLessEqual(circle.radius, 20)
+        self.assertLessEqual(square.side, 20)
+
     def test_renders_circle_and_square(self) -> None:
         individual = Individual(
             width=8,
@@ -187,6 +212,33 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(rendered.shape, (2, 6))
         self.assertEqual(rendered[0, 0], 10)
         self.assertEqual(rendered[0, 5], 240)
+
+    def test_compositing_cache_survives_copy_and_partial_invalidation(self) -> None:
+        individual = Individual(
+            width=6,
+            height=6,
+            mode="grayscale",
+            triangles=[
+                Square(top_left=np.array([0, 0], dtype=np.int32), side=5, color=200, alpha=255),
+                Square(top_left=np.array([2, 2], dtype=np.int32), side=2, color=50, alpha=255),
+            ],
+        )
+        cached_config = Config(mode="grayscale", shape_mode="square", use_compositing_cache=True)
+
+        render_individual(individual, cached_config, 255)
+        copied = individual.copy()
+        assert isinstance(copied.triangles[1], Square)
+        copied.triangles[1].color = 10
+        copied.invalidate_cache_from(1)
+
+        cached = render_individual(copied, cached_config, 255)
+        self.assertIsNotNone(copied._compositing_cache[0])
+        self.assertIsNotNone(copied._compositing_cache[1])
+
+        copied._compositing_cache = []
+        uncached = render_individual(copied, Config(mode="grayscale", shape_mode="square"), 255)
+
+        np.testing.assert_array_equal(cached, uncached)
 
 
 class PipelineTests(unittest.TestCase):

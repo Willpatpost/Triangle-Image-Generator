@@ -7,8 +7,7 @@ from dataclasses import asdict
 from typing import Any
 
 import numpy as np
-from PIL import Image
-from skimage.filters import gaussian
+from PIL import Image, ImageFilter
 
 from core.config import ColorMode, Config
 from core.paths import ITERATION_PREFIX
@@ -28,13 +27,10 @@ def load_reference_image(
         height = max(1, image.height // downsample)
         image = image.resize((width, height), Image.Resampling.LANCZOS)
 
-    array = np.array(image)
-
-    array = array.astype(np.float32)
     if blur_sigma > 0:
-        array = gaussian(array, sigma=blur_sigma, channel_axis=None if mode == "grayscale" else -1)
+        image = image.filter(ImageFilter.GaussianBlur(radius=blur_sigma))
 
-    array = np.clip(array, 0, 255).astype(np.uint8)
+    array = np.array(image, dtype=np.uint8)
 
     if mode == "grayscale":
         background = int(np.mean(array))

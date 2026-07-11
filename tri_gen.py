@@ -190,6 +190,7 @@ class TriangleImageApp(tk.Tk):
                 hill_climb_interval=75,
                 hill_climb_attempts=1,
                 max_workers=1,
+                use_compositing_cache=True,
                 enable_logging=False,
             )
             session = EvolutionSession(str(image_path), config, downsample=downsample)

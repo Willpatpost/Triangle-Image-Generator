@@ -24,7 +24,6 @@ def evaluate_fitness(
     config: Config,
     background: int | tuple[int, int, int],
 ) -> float:
-    individual._compositing_cache = []
     from core.renderer import render_individual
 
     rendered = render_individual(individual, config, background)

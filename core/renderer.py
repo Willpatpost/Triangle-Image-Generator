@@ -152,20 +152,36 @@ def render_individual(individual: Individual, config: Config, background: int | 
     if config.shape_mode == "voronoi" or any(isinstance(shape, VoronoiSite) for shape in individual.triangles):
         return render_voronoi(individual, background)
 
-    if config.use_compositing_cache and individual._compositing_cache:
-        for i, cached in enumerate(individual._compositing_cache):
-            if cached is not None and i == len(individual._compositing_cache) - 1:
-                return np.clip(cached, 0, 255).astype(np.uint8)
+    cache = individual._compositing_cache if config.use_compositing_cache else []
+    cached_index = -1
+    if cache:
+        max_cache_index = min(len(cache), len(individual.triangles)) - 1
+        for i in range(max_cache_index, -1, -1):
+            if cache[i] is not None:
+                cached_index = i
+                break
 
-    canvas = new_canvas(width, height, mode, background)
-    cache: list[np.ndarray | None] = []
+    if cached_index >= 0:
+        cached = cache[cached_index]
+        assert cached is not None
+        if cached_index == len(individual.triangles) - 1:
+            return np.clip(cached, 0, 255).astype(np.uint8)
+        canvas = cached.copy()
+    else:
+        canvas = new_canvas(width, height, mode, background)
+        if config.use_compositing_cache:
+            cache = [None] * len(individual.triangles)
 
-    for shape in individual.triangles:
+    if config.use_compositing_cache and len(cache) < len(individual.triangles):
+        cache.extend([None] * (len(individual.triangles) - len(cache)))
+    elif config.use_compositing_cache and len(cache) > len(individual.triangles):
+        del cache[len(individual.triangles) :]
+
+    for index in range(cached_index + 1, len(individual.triangles)):
+        shape = individual.triangles[index]
         composite_shape(canvas, shape, width, height, mode, config)
         if config.use_compositing_cache:
-            cache.append(canvas.copy())
-        else:
-            cache.append(None)
+            cache[index] = canvas.copy()
 
     if config.use_compositing_cache:
         individual._compositing_cache = cache

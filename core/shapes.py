@@ -195,20 +195,25 @@ def _mutate_appearance(shape: Shape, mode: ColorMode, config: Config, scale: flo
 
 
 def random_triangle(width: int, height: int, mode: ColorMode, config: Config) -> Triangle:
-    points = np.array(
-        [
-            [random.randint(0, width - 1), random.randint(0, height - 1)]
-            for _ in range(3)
-        ],
-        dtype=np.int32,
-    )
+    max_span = max(1, int(min(width, height) / config.new_shape_size_divisor))
+    center_x = random.randint(0, width - 1)
+    center_y = random.randint(0, height - 1)
+    points = []
+    for _ in range(3):
+        points.append(
+            [
+                clamp_int(center_x + random.randint(-max_span, max_span), 0, width - 1),
+                clamp_int(center_y + random.randint(-max_span, max_span), 0, height - 1),
+            ]
+        )
+    points = np.array(points, dtype=np.int32)
     color = _random_color(mode)
     alpha = random.randint(config.alpha_min, config.alpha_max)
     return Triangle(points=points, color=color, alpha=alpha)
 
 
 def random_circle(width: int, height: int, mode: ColorMode, config: Config) -> Circle:
-    max_radius = max(1, min(width, height) // 3)
+    max_radius = max(1, int(min(width, height) / config.new_shape_size_divisor))
     center = np.array(
         [random.randint(0, width - 1), random.randint(0, height - 1)],
         dtype=np.int32,
@@ -219,7 +224,7 @@ def random_circle(width: int, height: int, mode: ColorMode, config: Config) -> C
 
 
 def random_square(width: int, height: int, mode: ColorMode, config: Config) -> Square:
-    max_side = max(1, min(width, height) // 2)
+    max_side = max(1, int(min(width, height) / config.new_shape_size_divisor))
     side = random.randint(1, max_side)
     max_x = max(0, width - side)
     max_y = max(0, height - side)
@@ -425,6 +430,7 @@ class Individual:
             mode=self.mode,
             triangles=[t.copy() for t in self.triangles],
             fitness=self.fitness,
+            _compositing_cache=list(self._compositing_cache),
         )
 
     def invalidate_cache_from(self, index: int) -> None:
@@ -436,13 +442,11 @@ class Individual:
     def ensure_min_triangles(self, config: Config) -> None:
         while len(self.triangles) < config.min_triangles:
             self.triangles.append(random_shape(self.width, self.height, self.mode, config.shape_mode, config))
-        self._compositing_cache = []
 
     def add_random_triangle(self, config: Config) -> None:
         if len(self.triangles) >= config.nb_elements_max:
             return
         self.triangles.append(random_shape(self.width, self.height, self.mode, config.shape_mode, config))
-        self._compositing_cache = []
         self.fitness = float("inf")
 
     def remove_random_triangle(self, config: Config) -> None:
@@ -450,7 +454,7 @@ class Individual:
             return
         idx = random.randint(0, len(self.triangles) - 1)
         del self.triangles[idx]
-        self._compositing_cache = []
+        self.invalidate_cache_from(idx)
         self.fitness = float("inf")
 
     def mutate(self, config: Config, rate: float = 1.0) -> None:

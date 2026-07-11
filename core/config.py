@@ -42,6 +42,7 @@ class Config:
     alpha_max: int = 245
     gaussian_blur_sigma: float = 0.5
     use_compositing_cache: bool = False
+    new_shape_size_divisor: float = 4.0
 
     # Fitness
     shape_penalty_weight: float = 0.01
@@ -94,6 +95,8 @@ class Config:
             raise ValueError("alpha_min must be less than or equal to alpha_max")
         if self.fixed_alpha > 1.0:
             raise ValueError("fixed_alpha must be negative or between 0.0 and 1.0")
+        if self.new_shape_size_divisor < 1.0:
+            raise ValueError("new_shape_size_divisor must be at least 1.0")
 
     def elite_fraction(self) -> float:
         return self.nb_elite / max(self.pop_size, 1)
