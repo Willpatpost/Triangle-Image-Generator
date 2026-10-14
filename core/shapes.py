@@ -781,6 +781,9 @@ class Individual:
     # (dirty bbox, composited region, pre-mutation render, shared materialized
     # slot); forks share the slot so one lazily materialized canvas serves all.
     _pending_region: tuple[BBox, np.ndarray, np.ndarray, list] | None = field(default=None, repr=False)
+    # (fixed_alpha, EncodedShapes) for the accelerated backends; invalidated
+    # on mutation so the encoded arrays can be shared across forks.
+    _encoded_cache: tuple[float, object] | None = field(default=None, repr=False)
 
     def copy(self) -> Individual:
         return Individual(
@@ -797,6 +800,7 @@ class Individual:
             _base_render=self._base_render,
             _base_error_sum=self._base_error_sum,
             _pending_region=self._pending_region,
+            _encoded_cache=self._encoded_cache,
         )
 
     def fork(self) -> Individual:
@@ -811,6 +815,7 @@ class Individual:
             _compositing_cache_signature=self._compositing_cache_signature,
             _pixel_error_sum=self._pixel_error_sum,
             _pending_region=self._pending_region,
+            _encoded_cache=self._encoded_cache,
         )
 
     def _cached_final_render(self) -> np.ndarray | None:
@@ -855,6 +860,7 @@ class Individual:
                 max(self._dirty_bbox[3], bbox[3]),
             )
         self._pixel_error_sum = None
+        self._encoded_cache = None
 
     def _clear_dirty_tracking(self) -> None:
         self._dirty_from = None
@@ -864,6 +870,7 @@ class Individual:
 
     def invalidate_cache_from(self, index: int) -> None:
         self._pixel_error_sum = None
+        self._encoded_cache = None
         if not self._compositing_cache:
             return
         for i in range(index, len(self._compositing_cache)):
@@ -874,6 +881,7 @@ class Individual:
         self._compositing_cache_signature = None
         self._pixel_error_sum = None
         self._pending_region = None
+        self._encoded_cache = None
         self._clear_dirty_tracking()
         if include_shape_masks:
             for shape in self.shapes:

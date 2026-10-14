@@ -352,6 +352,21 @@ class AccelerationTests(unittest.TestCase):
 
         np.testing.assert_array_equal(actual, expected)
 
+    def test_encode_shapes_cache_reuses_and_invalidates(self) -> None:
+        config = Config(mode="grayscale", shape_mode="square")
+        individual = Individual.random(16, 16, "grayscale", config, 3, rng=random.Random(1))
+
+        first = encode_shapes(individual, config)
+        second = encode_shapes(individual, config)
+        self.assertIs(first, second)
+
+        individual.mutate(config, rate=1.0, rng=random.Random(2))
+        third = encode_shapes(individual, config)
+        self.assertIsNot(third, first)
+
+        other = encode_shapes(individual, replace(config, fixed_alpha=0.5))
+        self.assertIsNot(other, third)
+
     def test_numba_loop_body_matches_numpy_renderer(self) -> None:
         individual = self._sample_individual()
         config = Config(

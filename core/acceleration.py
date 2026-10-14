@@ -155,6 +155,9 @@ def resolve_renderer_backend(
 
 
 def encode_shapes(individual: Individual, config: Config) -> EncodedShapes:
+    cached = individual._encoded_cache
+    if cached is not None and cached[0] == config.fixed_alpha:
+        return cached[1]
     count = len(individual.shapes)
     kinds = np.empty(count, dtype=np.int8)
     geometry = np.zeros((count, 6), dtype=np.int32)
@@ -191,7 +194,9 @@ def encode_shapes(individual: Individual, config: Config) -> EncodedShapes:
                 else shape.alpha / 255.0
             )
 
-    return EncodedShapes(kinds, geometry, bounds, colors, alphas)
+    encoded = EncodedShapes(kinds, geometry, bounds, colors, alphas)
+    individual._encoded_cache = (config.fixed_alpha, encoded)
+    return encoded
 
 
 def _render_gray_impl(

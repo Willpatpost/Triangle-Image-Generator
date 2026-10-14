@@ -47,6 +47,14 @@
   mean best fitness by 26% at 5 s and 18% at 15 s — losing every seed —
   because rank selection on whole individuals couples too weakly to
   per-shape strategy parameters for the drift to climb.
+- `encode_shapes` results are now cached per individual (keyed on
+  `fixed_alpha`, invalidated by any mutation, shared across forks), so
+  repeated accelerated renders of an unchanged genome skip re-encoding.
+- Numba `prange` parallelization was measured and rejected: pixel-major
+  parallel kernels regressed throughput roughly 60× (3.2 vs 195 steps/s
+  at 128×128) because the incremental flow composites small dirty regions
+  where numba's per-call thread-launch overhead dominates on many-core
+  hosts. The serial shape-major kernels stay.
 
 ## 2.4.0 — 2026-10-14
 
