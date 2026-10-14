@@ -90,6 +90,8 @@ def _shape_to_dict(shape: Shape) -> dict[str, Any]:
         data["alpha"] = shape.alpha
         data["top_left"] = shape.top_left.tolist()
         data["side"] = shape.side
+    if shape.mutation_scale != 1.0:
+        data["mutation_scale"] = shape.mutation_scale
     return data
 
 
@@ -105,6 +107,7 @@ def _shape_from_dict(data: dict[str, Any]) -> Shape:
             radius=int(data["radius"]),
             color=color,
             alpha=int(data["alpha"]),
+            mutation_scale=float(data.get("mutation_scale", 1.0)),
         )
     if kind == "square":
         return Square(
@@ -112,10 +115,20 @@ def _shape_from_dict(data: dict[str, Any]) -> Shape:
             side=int(data["side"]),
             color=color,
             alpha=int(data["alpha"]),
+            mutation_scale=float(data.get("mutation_scale", 1.0)),
         )
     if kind == "voronoi":
-        return VoronoiSite(point=np.array(data["point"], dtype=np.int32), color=color)
-    return Triangle(points=np.array(data["points"], dtype=np.int32), color=color, alpha=int(data["alpha"]))
+        return VoronoiSite(
+            point=np.array(data["point"], dtype=np.int32),
+            color=color,
+            mutation_scale=float(data.get("mutation_scale", 1.0)),
+        )
+    return Triangle(
+        points=np.array(data["points"], dtype=np.int32),
+        color=color,
+        alpha=int(data["alpha"]),
+        mutation_scale=float(data.get("mutation_scale", 1.0)),
+    )
 
 
 def _config_to_dict(config: Config) -> dict[str, Any]:

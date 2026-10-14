@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -24,6 +25,7 @@ class Triangle:
     points: np.ndarray  # shape (3, 2), int
     color: int | tuple[int, int, int]
     alpha: int
+    mutation_scale: float = 1.0
     _mask_cache: MaskCache | None = field(default=None, repr=False, compare=False)
 
     def copy(self) -> Triangle:
@@ -31,6 +33,7 @@ class Triangle:
             points=self.points.copy(),
             color=self.color,
             alpha=self.alpha,
+            mutation_scale=self.mutation_scale,
             _mask_cache=self._mask_cache,
         )
 
@@ -39,6 +42,7 @@ class Triangle:
             points=self.points,
             color=self.color,
             alpha=self.alpha,
+            mutation_scale=self.mutation_scale,
             _mask_cache=self._mask_cache,
         )
 
@@ -60,6 +64,7 @@ class Circle:
     radius: int
     color: int | tuple[int, int, int]
     alpha: int
+    mutation_scale: float = 1.0
     _mask_cache: MaskCache | None = field(default=None, repr=False, compare=False)
 
     def copy(self) -> Circle:
@@ -68,6 +73,7 @@ class Circle:
             radius=self.radius,
             color=self.color,
             alpha=self.alpha,
+            mutation_scale=self.mutation_scale,
             _mask_cache=self._mask_cache,
         )
 
@@ -77,6 +83,7 @@ class Circle:
             radius=self.radius,
             color=self.color,
             alpha=self.alpha,
+            mutation_scale=self.mutation_scale,
             _mask_cache=self._mask_cache,
         )
 
@@ -98,6 +105,7 @@ class Square:
     side: int
     color: int | tuple[int, int, int]
     alpha: int
+    mutation_scale: float = 1.0
     _mask_cache: MaskCache | None = field(default=None, repr=False, compare=False)
 
     def copy(self) -> Square:
@@ -106,6 +114,7 @@ class Square:
             side=self.side,
             color=self.color,
             alpha=self.alpha,
+            mutation_scale=self.mutation_scale,
             _mask_cache=self._mask_cache,
         )
 
@@ -115,6 +124,7 @@ class Square:
             side=self.side,
             color=self.color,
             alpha=self.alpha,
+            mutation_scale=self.mutation_scale,
             _mask_cache=self._mask_cache,
         )
 
@@ -134,12 +144,14 @@ class Square:
 class VoronoiSite:
     point: np.ndarray  # shape (2,), int
     color: int | tuple[int, int, int]
+    mutation_scale: float = 1.0
     _mask_cache: MaskCache | None = field(default=None, repr=False, compare=False)
 
     def copy(self) -> VoronoiSite:
         return VoronoiSite(
             point=self.point.copy(),
             color=self.color,
+            mutation_scale=self.mutation_scale,
             _mask_cache=self._mask_cache,
         )
 
@@ -147,6 +159,7 @@ class VoronoiSite:
         return VoronoiSite(
             point=self.point,
             color=self.color,
+            mutation_scale=self.mutation_scale,
             _mask_cache=self._mask_cache,
         )
 
@@ -178,6 +191,16 @@ def _random_color(mode: ColorMode, rng: random.Random) -> int | tuple[int, int, 
         rng.randint(0, 255),
         rng.randint(0, 255),
     )
+
+
+def _mutate_scale(shape: Shape, config: Config, *, rng: random.Random) -> float:
+    """Self-adapt a shape's mutation-scale multiplier (log-normal) when enabled."""
+    if not config.adaptive_shape_sigmas:
+        return 1.0
+    scale = shape.mutation_scale * math.exp(config.adaptive_sigma_tau * rng.gauss(0, 1))
+    scale = min(max(scale, 0.01), 100.0)
+    shape.mutation_scale = scale
+    return scale
 
 
 def _choose_anchor(
@@ -299,6 +322,7 @@ def _mutate_appearance(
     *,
     rng: random.Random,
 ) -> None:
+    scale = scale * _mutate_scale(shape, config, rng=rng)
     if mode == "grayscale":
         if rng.random() < 0.5:
             shape.color = _mutate_color(shape.color, mode, config, scale, rng=rng)
@@ -438,11 +462,12 @@ def mutate_triangle(
     rng: random.Random,
 ) -> None:
     if rng.random() < config.prob_mutate_geometry:
+        scale = _mutate_scale(tri, config, rng=rng)
         tri.points = tri.points.copy()
         point = rng.randrange(3)
         axis = rng.randrange(2)
         limit = width - 1 if axis == 0 else height - 1
-        delta = rng.gauss(0, 1) * config.mutation_sigma_points * rate
+        delta = rng.gauss(0, 1) * config.mutation_sigma_points * rate * scale
         tri.points[point, axis] = clamp_int(tri.points[point, axis] + delta, 0, limit)
         tri.invalidate_caches()
     else:
@@ -460,9 +485,10 @@ def mutate_circle(
     rng: random.Random,
 ) -> None:
     if rng.random() < config.prob_mutate_geometry:
+        scale = _mutate_scale(circle, config, rng=rng)
         circle.center = circle.center.copy()
         slot = rng.randrange(3)
-        delta = rng.gauss(0, 1) * config.mutation_sigma_points * rate
+        delta = rng.gauss(0, 1) * config.mutation_sigma_points * rate * scale
         if slot < 2:
             limit = width - 1 if slot == 0 else height - 1
             circle.center[slot] = clamp_int(circle.center[slot] + delta, 0, limit)
@@ -484,9 +510,10 @@ def mutate_square(
     rng: random.Random,
 ) -> None:
     if rng.random() < config.prob_mutate_geometry:
+        scale = _mutate_scale(square, config, rng=rng)
         square.top_left = square.top_left.copy()
         slot = rng.randrange(3)
-        delta = rng.gauss(0, 1) * config.mutation_sigma_points * rate
+        delta = rng.gauss(0, 1) * config.mutation_sigma_points * rate * scale
         if slot == 0:
             square.top_left[0] = clamp_int(square.top_left[0] + delta, 0, max(0, width - square.side))
         elif slot == 1:
@@ -561,18 +588,20 @@ def mutate_voronoi_site(
             )
             site.invalidate_caches()
             return
+        scale = _mutate_scale(site, config, rng=rng)
         site.point = site.point.copy()
         axis = rng.randrange(2)
         limit = width - 1 if axis == 0 else height - 1
-        delta = rng.gauss(0, 1) * config.mutation_sigma_points * rate
+        delta = rng.gauss(0, 1) * config.mutation_sigma_points * rate * scale
         site.point[axis] = clamp_int(site.point[axis] + delta, 0, limit)
         site.invalidate_caches()
     else:
+        scale = _mutate_scale(site, config, rng=rng)
         site.color = _mutate_color(
             site.color,
             mode,
             config,
-            rate * config.voronoi_color_sigma_scale,
+            rate * config.voronoi_color_sigma_scale * scale,
             rng=rng,
         )
 
@@ -629,7 +658,7 @@ def blend_triangles(
         )
 
     alpha = clamp_int(a.alpha * t + b.alpha * (1 - t), config.alpha_min, config.alpha_max)
-    return Triangle(points=points, color=color, alpha=alpha)
+    return Triangle(points=points, color=color, alpha=alpha, mutation_scale=_blend_scale(a, b, t))
 
 
 def blend_circles(
@@ -649,7 +678,9 @@ def blend_circles(
     radius = clamp_int(a.radius * t + b.radius * (1 - t), 1, max(1, min(width, height) // 2))
     color = _blend_color(a.color, b.color, mode, t)
     alpha = clamp_int(a.alpha * t + b.alpha * (1 - t), config.alpha_min, config.alpha_max)
-    return Circle(center=center, radius=radius, color=color, alpha=alpha)
+    return Circle(
+        center=center, radius=radius, color=color, alpha=alpha, mutation_scale=_blend_scale(a, b, t)
+    )
 
 
 def blend_squares(
@@ -670,7 +701,9 @@ def blend_squares(
     side = clamp_int(a.side * t + b.side * (1 - t), 1, max_side)
     color = _blend_color(a.color, b.color, mode, t)
     alpha = clamp_int(a.alpha * t + b.alpha * (1 - t), config.alpha_min, config.alpha_max)
-    return Square(top_left=top_left, side=side, color=color, alpha=alpha)
+    return Square(
+        top_left=top_left, side=side, color=color, alpha=alpha, mutation_scale=_blend_scale(a, b, t)
+    )
 
 
 def blend_voronoi_sites(
@@ -688,7 +721,11 @@ def blend_voronoi_sites(
     point[0] = clamp_int(point[0], 0, width - 1)
     point[1] = clamp_int(point[1], 0, height - 1)
     color = _blend_color(a.color, b.color, mode, t)
-    return VoronoiSite(point=point, color=color)
+    return VoronoiSite(point=point, color=color, mutation_scale=_blend_scale(a, b, t))
+
+
+def _blend_scale(a: Shape, b: Shape, t: float) -> float:
+    return min(max(a.mutation_scale * t + b.mutation_scale * (1 - t), 0.01), 100.0)
 
 
 def _blend_color(
@@ -1102,7 +1139,11 @@ def scale_individual(individual: Individual, width: int, height: int) -> Individ
             for index, point in enumerate(shape.points):
                 points[index, 0] = _scale_coordinate(int(point[0]), individual.width, width)
                 points[index, 1] = _scale_coordinate(int(point[1]), individual.height, height)
-            shapes.append(Triangle(points=points, color=shape.color, alpha=shape.alpha))
+            shapes.append(
+                Triangle(
+                    points=points, color=shape.color, alpha=shape.alpha, mutation_scale=shape.mutation_scale
+                )
+            )
         elif isinstance(shape, Circle):
             center = np.array(
                 [
@@ -1112,7 +1153,12 @@ def scale_individual(individual: Individual, width: int, height: int) -> Individ
                 dtype=np.int32,
             )
             radius = clamp_int(shape.radius * radius_scale, 1, max(1, min(width, height) // 2))
-            shapes.append(Circle(center=center, radius=radius, color=shape.color, alpha=shape.alpha))
+            shapes.append(
+                Circle(
+                    center=center, radius=radius, color=shape.color, alpha=shape.alpha,
+                    mutation_scale=shape.mutation_scale,
+                )
+            )
         elif isinstance(shape, Square):
             top_left = np.array(
                 [
@@ -1123,7 +1169,12 @@ def scale_individual(individual: Individual, width: int, height: int) -> Individ
             )
             max_side = max(1, min(width - int(top_left[0]), height - int(top_left[1])))
             side = clamp_int(shape.side * radius_scale, 1, max_side)
-            shapes.append(Square(top_left=top_left, side=side, color=shape.color, alpha=shape.alpha))
+            shapes.append(
+                Square(
+                    top_left=top_left, side=side, color=shape.color, alpha=shape.alpha,
+                    mutation_scale=shape.mutation_scale,
+                )
+            )
         else:
             point = np.array(
                 [
@@ -1132,7 +1183,9 @@ def scale_individual(individual: Individual, width: int, height: int) -> Individ
                 ],
                 dtype=np.int32,
             )
-            shapes.append(VoronoiSite(point=point, color=shape.color))
+            shapes.append(
+                VoronoiSite(point=point, color=shape.color, mutation_scale=shape.mutation_scale)
+            )
 
     return Individual(
         width=width,

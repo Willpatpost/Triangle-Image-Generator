@@ -54,6 +54,8 @@ class Config:
     # benchmark because centroid moves serve partition coverage, not color.
     voronoi_lloyd_probability: float = 0.0
     voronoi_lloyd_stride: int = 4
+    adaptive_shape_sigmas: bool = False
+    adaptive_sigma_tau: float = 0.15
 
     # Crossover
     crossover_rate: float = 0.0
@@ -170,6 +172,8 @@ class Config:
             raise ValueError("voronoi_color_sigma_scale must be non-negative")
         if self.voronoi_lloyd_stride < 1:
             raise ValueError("voronoi_lloyd_stride must be at least 1")
+        if self.adaptive_sigma_tau <= 0:
+            raise ValueError("adaptive_sigma_tau must be greater than 0")
         if not 0 <= self.alpha_min <= 255:
             raise ValueError("alpha_min must be between 0 and 255")
         if not 0 <= self.alpha_max <= 255:

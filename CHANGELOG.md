@@ -38,6 +38,15 @@
   instead of copying the whole raster for every evaluated mutation.
   Measured numpy throughput improves about 8% at 128×128 and 10% at 256×256
   with unchanged convergence.
+- New opt-in self-adaptive per-shape sigmas, off by default after
+  measurement: `adaptive_shape_sigmas` gives every shape a
+  `mutation_scale` multiplier that self-adapts log-normally
+  (`adaptive_sigma_tau`, bounded 0.01–100) before each mutation and
+  round-trips through sessions, forks, blends, and resolution refines as
+  an optional per-shape field. On the structured benchmark it regressed
+  mean best fitness by 26% at 5 s and 18% at 15 s — losing every seed —
+  because rank selection on whole individuals couples too weakly to
+  per-shape strategy parameters for the drift to climb.
 
 ## 2.4.0 — 2026-10-14
 

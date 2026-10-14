@@ -120,6 +120,10 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Config(mutation_anneal_iterations=-1).validate()
 
+    def test_validate_rejects_nonpositive_adaptive_sigma_tau(self) -> None:
+        with self.assertRaises(ValueError):
+            Config(adaptive_sigma_tau=0.0).validate()
+
 
 class FitnessTests(unittest.TestCase):
     def test_normalized_mse_is_independent_of_image_size(self) -> None:
@@ -621,6 +625,60 @@ class StateTests(unittest.TestCase):
 
         self.assertIsInstance(state.best.shapes[0], VoronoiSite)
         self.assertEqual(state.best.shapes[0].color, 90)
+
+    def test_mutation_scale_round_trips(self) -> None:
+        tuned = Individual(
+            width=4,
+            height=4,
+            mode="grayscale",
+            shapes=[
+                Square(
+                    top_left=np.array([0, 0], dtype=np.int32),
+                    side=2,
+                    color=60,
+                    alpha=140,
+                    mutation_scale=2.5,
+                )
+            ],
+            fitness=0.3,
+        )
+        plain = Individual(
+            width=4,
+            height=4,
+            mode="grayscale",
+            shapes=[Square(top_left=np.array([0, 0], dtype=np.int32), side=2, color=60, alpha=140)],
+            fitness=0.3,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tuned_path = Path(tmp) / "tuned.json"
+            save_state(
+                str(tuned_path),
+                iteration=1,
+                best=tuned,
+                best_fitness=0.3,
+                config=Config(shape_mode="square", adaptive_shape_sigmas=True),
+                background=255,
+            )
+            payload = json.loads(tuned_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["best"]["shapes"][0]["mutation_scale"], 2.5)
+            tuned_state = read_state(str(tuned_path))
+
+            plain_path = Path(tmp) / "plain.json"
+            save_state(
+                str(plain_path),
+                iteration=1,
+                best=plain,
+                best_fitness=0.3,
+                config=Config(shape_mode="square"),
+                background=255,
+            )
+            payload = json.loads(plain_path.read_text(encoding="utf-8"))
+            self.assertNotIn("mutation_scale", payload["best"]["shapes"][0])
+            plain_state = read_state(str(plain_path))
+
+        self.assertEqual(tuned_state.best.shapes[0].mutation_scale, 2.5)
+        self.assertEqual(plain_state.best.shapes[0].mutation_scale, 1.0)
 
 
 class RendererTests(unittest.TestCase):
@@ -1182,6 +1240,46 @@ class GeneticTests(unittest.TestCase):
                     parent_snapshots[index],
                     err_msg=f"Shape {index} geometry drifted despite elite_candidate_rate=0.0",
                 )
+
+    def test_adaptive_sigma_self_adapts_when_enabled(self) -> None:
+        config = Config(
+            mode="grayscale",
+            shape_mode="square",
+            adaptive_shape_sigmas=True,
+            adaptive_sigma_tau=2.0,
+            prob_structural=0.0,
+            prob_reorder=0.0,
+            prob_mutate_geometry=1.0,
+            nb_elements_initial=1,
+            nb_elements_max=4,
+            min_shapes=1,
+        )
+        square = Square(top_left=np.array([2, 2], dtype=np.int32), side=3, color=90, alpha=200)
+        individual = Individual(width=16, height=16, mode="grayscale", shapes=[square])
+
+        individual.mutate(config, rate=1.0, rng=random.Random(5))
+
+        self.assertNotEqual(square.mutation_scale, 1.0)
+        self.assertGreaterEqual(square.mutation_scale, 0.01)
+        self.assertLessEqual(square.mutation_scale, 100.0)
+
+    def test_adaptive_sigma_disabled_keeps_scale_at_one(self) -> None:
+        config = Config(
+            mode="grayscale",
+            shape_mode="square",
+            prob_structural=0.0,
+            prob_reorder=0.0,
+            prob_mutate_geometry=1.0,
+            nb_elements_initial=1,
+            nb_elements_max=4,
+            min_shapes=1,
+        )
+        square = Square(top_left=np.array([2, 2], dtype=np.int32), side=3, color=90, alpha=200)
+        individual = Individual(width=16, height=16, mode="grayscale", shapes=[square])
+
+        individual.mutate(config, rate=1.0, rng=random.Random(5))
+
+        self.assertEqual(square.mutation_scale, 1.0)
 
 
 class CrossoverTests(unittest.TestCase):
