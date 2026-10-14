@@ -101,7 +101,9 @@ class EvolutionSession:
         self.iteration = 0
         self.stagnation = 0
         self.mutation_rate = self.config.mutation_rate
-        initial_guide = EvolutionGuide.from_background(self.reference, self.background)
+        initial_guide = EvolutionGuide.from_background(
+            self.reference, self.background, error_stride=self.config.guidance_map_stride
+        )
         self.population = create_initial_population(
             width,
             height,
@@ -138,7 +140,9 @@ class EvolutionSession:
                 individual.clear_caches(include_shape_masks=False)
                 individual.fitness = float("inf")
         else:
-            initial_guide = EvolutionGuide.from_background(self.reference, self.background)
+            initial_guide = EvolutionGuide.from_background(
+                self.reference, self.background, error_stride=self.config.guidance_map_stride
+            )
             self.population = create_initial_population(
                 width,
                 height,
@@ -209,7 +213,9 @@ class EvolutionSession:
             self.mutation_rate = self.config.mutation_rate
 
         baseline = render_individual_float(self.global_best, self.config, self.background)
-        guide = EvolutionGuide(self.reference, baseline)
+        guide = EvolutionGuide(
+            self.reference, baseline, error_stride=self.config.guidance_map_stride
+        )
         self.population = next_generation(
             self.population,
             self.ranked,

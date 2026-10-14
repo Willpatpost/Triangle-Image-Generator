@@ -103,6 +103,10 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Config(elite_candidate_rate=-0.1).validate()
 
+    def test_validate_rejects_invalid_guidance_stride(self) -> None:
+        with self.assertRaises(ValueError):
+            Config(guidance_map_stride=0).validate()
+
 
 class FitnessTests(unittest.TestCase):
     def test_normalized_mse_is_independent_of_image_size(self) -> None:
@@ -614,6 +618,69 @@ class RendererTests(unittest.TestCase):
 
         self.assertEqual(guide.sample_high_error_point(4, rng=random.Random(0)), (0, 0))
         self.assertEqual(guide.optimal_color(0, 0, 0.5, "color"), (200, 220, 240))
+
+    def test_guidance_error_map_samples_high_error_region(self) -> None:
+        reference = np.zeros((16, 16), dtype=np.uint8)
+        reference[0:8, 0:8] = 255
+        baseline = np.zeros((16, 16), dtype=np.float32)
+        guide = EvolutionGuide(reference, baseline, error_stride=4)
+
+        for seed in range(8):
+            x, y = guide.sample_high_error_point(4, rng=random.Random(seed))
+            self.assertLess(x, 8)
+            self.assertLess(y, 8)
+
+        legacy = EvolutionGuide(reference, baseline, error_stride=1)
+        x, y = legacy.sample_high_error_point(8, rng=random.Random(0))
+        self.assertTrue(0 <= x < 16)
+        self.assertTrue(0 <= y < 16)
+
+    def test_weighted_mutation_targets_prefer_high_error_shapes(self) -> None:
+        reference = np.zeros((16, 16), dtype=np.uint8)
+        reference[0:8, 0:8] = 255
+        baseline = np.zeros((16, 16), dtype=np.float32)
+        guide = EvolutionGuide(reference, baseline, error_stride=4)
+        config = Config(
+            mode="grayscale",
+            shape_mode="square",
+            weighted_mutation_targets=True,
+            prob_structural=0.0,
+            prob_reorder=0.0,
+            prob_mutate_geometry=1.0,
+            mutation_sigma_points=100.0,
+            nb_elements_initial=2,
+            nb_elements_max=8,
+            min_shapes=1,
+        )
+        quiet = Square(top_left=np.array([9, 9], dtype=np.int32), side=5, color=0, alpha=255)
+        loud = Square(top_left=np.array([0, 0], dtype=np.int32), side=5, color=0, alpha=255)
+        individual = Individual(width=16, height=16, mode="grayscale", shapes=[quiet, loud])
+
+        individual.mutate(config, rate=1.0, guide=guide, rng=random.Random(4))
+
+        np.testing.assert_array_equal(quiet.top_left, np.array([9, 9]))
+        self.assertEqual(quiet.side, 5)
+        loud_changed = not np.array_equal(loud.top_left, np.array([0, 0])) or loud.side != 5
+        self.assertTrue(loud_changed)
+
+    def test_guided_alpha_search_picks_best_patch_alpha(self) -> None:
+        reference = np.full((16, 16), 200, dtype=np.uint8)
+        baseline = np.full((16, 16), 100, dtype=np.float32)
+        guide = EvolutionGuide(reference, baseline, error_stride=4)
+        config = Config(
+            mode="grayscale",
+            shape_mode="square",
+            alpha_min=64,
+            alpha_max=255,
+            guided_alpha_search=True,
+            target_guided_shapes=True,
+            target_guided_probability=1.0,
+        )
+
+        square = random_square(16, 16, "grayscale", config, guide, rng=random.Random(0))
+
+        self.assertEqual(square.alpha, 255)
+        self.assertEqual(square.color, 200)
 
     def test_random_shapes_use_size_divisor(self) -> None:
         rng = random.Random(2)

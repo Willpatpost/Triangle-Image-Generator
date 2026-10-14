@@ -11,6 +11,13 @@
   Set `elite_candidates` to 0 to restore the previous behavior.
 - `benchmarks/benchmark.py` accepts `--target` to benchmark against an image
   file and `--elite-candidates` for candidate sweeps.
+- New opt-in guidance upgrades, off by default after measurement: an
+  error-map guide (`guidance_map_stride`), error-weighted mutation targets
+  (`weighted_mutation_targets`), and guided alpha/color search
+  (`guided_alpha_search`). Combined, they regressed mean best fitness by
+  16% at 5 s and 34% at 15 s on the structured benchmark (over-exploitation;
+  one seed improved sharply), so random probing and uniform targets stay
+  the defaults.
 
 ## 2.4.0 — 2026-10-14
 

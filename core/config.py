@@ -60,6 +60,11 @@ class Config:
     target_guided_shapes: bool = True
     target_guided_probability: float = 0.9
     target_guidance_candidates: int = 24
+    # Guidance upgrades, off by default: combined they over-exploit and
+    # regressed the structured benchmark, so random probing stays the default.
+    guidance_map_stride: int = 1  # error-map stride for guided anchors; 1 = random probing
+    weighted_mutation_targets: bool = False
+    guided_alpha_search: bool = False
 
     # Rendering
     fixed_alpha: float = -1.0  # <0 uses each shape's alpha
@@ -146,6 +151,8 @@ class Config:
             raise ValueError("at least one crossover weight must be positive")
         if self.target_guidance_candidates < 1:
             raise ValueError("target_guidance_candidates must be at least 1")
+        if self.guidance_map_stride < 1:
+            raise ValueError("guidance_map_stride must be at least 1")
         if min(self.mutation_sigma_points, self.mutation_sigma_color, self.mutation_sigma_alpha) < 0:
             raise ValueError("mutation sigmas must be non-negative")
         if self.voronoi_color_sigma_scale < 0:

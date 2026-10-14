@@ -199,21 +199,59 @@ def _choose_anchor(
     return rng.randint(0, width - 1), rng.randint(0, height - 1), False
 
 
-def _new_shape_color(
+def _guided_alpha_and_color(
+    config: Config,
+    guide: EvolutionGuide,
+    x: int,
+    y: int,
+    mode: ColorMode,
+) -> tuple[int, int | tuple[int, int, int]]:
+    """Pick the guided alpha/color pair with the lowest error on a small patch."""
+    height, width = guide.reference.shape[:2]
+    patch = 8
+    x0 = max(0, x - patch // 2)
+    y0 = max(0, y - patch // 2)
+    x1 = min(width, x0 + patch)
+    y1 = min(height, y0 + patch)
+    target = np.asarray(guide.reference[y0:y1, x0:x1], dtype=np.float32)
+    baseline = np.asarray(guide.baseline[y0:y1, x0:x1], dtype=np.float32)
+
+    steps = 5
+    span = max(config.alpha_max - config.alpha_min, 1)
+    best_alpha = config.alpha_max
+    best_color: int | tuple[int, int, int] = 0 if mode == "grayscale" else (0, 0, 0)
+    best_error = float("inf")
+    for step in range(steps):
+        alpha = config.alpha_min + (span * step) // max(steps - 1, 1)
+        factor = alpha / 255.0
+        color = guide.optimal_color(x, y, factor, mode)
+        color_array = np.asarray(color, dtype=np.float32)
+        predicted = (1.0 - factor) * baseline + factor * color_array
+        error = float(np.sum((target - predicted) ** 2, dtype=np.float64))
+        if error < best_error:
+            best_error = error
+            best_alpha = alpha
+            best_color = color
+    return best_alpha, best_color
+
+
+def _choose_alpha_and_color(
     mode: ColorMode,
     config: Config,
     guide: EvolutionGuide | None,
     x: int,
     y: int,
-    alpha: int,
     guided: bool,
     *,
     rng: random.Random,
-) -> int | tuple[int, int, int]:
+) -> tuple[int, int | tuple[int, int, int]]:
     if guide is None or not guided:
-        return _random_color(mode, rng)
+        return rng.randint(config.alpha_min, config.alpha_max), _random_color(mode, rng)
+    if config.guided_alpha_search:
+        return _guided_alpha_and_color(config, guide, x, y, mode)
+    alpha = rng.randint(config.alpha_min, config.alpha_max)
     alpha_factor = config.fixed_alpha if 0.0 <= config.fixed_alpha <= 1.0 else alpha / 255.0
-    return guide.optimal_color(x, y, alpha_factor, mode)
+    return alpha, guide.optimal_color(x, y, alpha_factor, mode)
 
 
 def _mutate_color(
@@ -303,8 +341,7 @@ def random_triangle(
             ]
         )
     points = np.array(points, dtype=np.int32)
-    alpha = rng.randint(config.alpha_min, config.alpha_max)
-    color = _new_shape_color(mode, config, guide, center_x, center_y, alpha, guided, rng=rng)
+    alpha, color = _choose_alpha_and_color(mode, config, guide, center_x, center_y, guided, rng=rng)
     return Triangle(points=points, color=color, alpha=alpha)
 
 
@@ -321,8 +358,7 @@ def random_circle(
     center_x, center_y, guided = _choose_anchor(width, height, config, guide, rng=rng)
     center = np.array([center_x, center_y], dtype=np.int32)
     radius = rng.randint(1, max_radius)
-    alpha = rng.randint(config.alpha_min, config.alpha_max)
-    color = _new_shape_color(mode, config, guide, center_x, center_y, alpha, guided, rng=rng)
+    alpha, color = _choose_alpha_and_color(mode, config, guide, center_x, center_y, guided, rng=rng)
     return Circle(center=center, radius=radius, color=color, alpha=alpha)
 
 
@@ -344,8 +380,7 @@ def random_square(
         clamp_int(center_x - side / 2, 0, max_x),
         clamp_int(center_y - side / 2, 0, max_y),
     ], dtype=np.int32)
-    alpha = rng.randint(config.alpha_min, config.alpha_max)
-    color = _new_shape_color(mode, config, guide, center_x, center_y, alpha, guided, rng=rng)
+    alpha, color = _choose_alpha_and_color(mode, config, guide, center_x, center_y, guided, rng=rng)
     return Square(top_left=top_left, side=side, color=color, alpha=alpha)
 
 
@@ -360,7 +395,11 @@ def random_voronoi_site(
 ) -> VoronoiSite:
     x, y, guided = _choose_anchor(width, height, config, guide, rng=rng)
     point = np.array([x, y], dtype=np.int32)
-    color = _new_shape_color(mode, config, guide, x, y, 255, guided, rng=rng)
+    if guided:
+        alpha_factor = config.fixed_alpha if 0.0 <= config.fixed_alpha <= 1.0 else 1.0
+        color = guide.optimal_color(x, y, alpha_factor, mode)
+    else:
+        color = _random_color(mode, rng)
     return VoronoiSite(point=point, color=color)
 
 
@@ -780,10 +819,42 @@ class Individual:
         self.fitness = float("inf")
         return True
 
-    def _mutate_random_shape(self, config: Config, rate: float, *, rng: random.Random) -> bool:
+    def _pick_mutation_target(
+        self,
+        config: Config,
+        guide: EvolutionGuide | None,
+        *,
+        rng: random.Random,
+    ) -> int:
+        if guide is None or not config.weighted_mutation_targets:
+            return rng.randint(0, len(self.shapes) - 1)
+        total = 0.0
+        weights = []
+        for shape in self.shapes:
+            weight = guide.shape_error_mass(*shape.bounding_box(self.width, self.height))
+            weights.append(weight)
+            total += weight
+        if total <= 0.0:
+            return rng.randint(0, len(self.shapes) - 1)
+        threshold = rng.random() * total
+        cumulative = 0.0
+        for index, weight in enumerate(weights):
+            cumulative += weight
+            if threshold < cumulative:
+                return index
+        return len(self.shapes) - 1
+
+    def _mutate_random_shape(
+        self,
+        config: Config,
+        rate: float,
+        guide: EvolutionGuide | None,
+        *,
+        rng: random.Random,
+    ) -> bool:
         if not self.shapes:
             return False
-        idx = rng.randint(0, len(self.shapes) - 1)
+        idx = self._pick_mutation_target(config, guide, rng=rng)
         old_bbox = self.shapes[idx].bounding_box(self.width, self.height)
         self._mark_dirty(idx, old_bbox)
         mutate_shape(
@@ -820,7 +891,7 @@ class Individual:
                 else:
                     changed = self.remove_random_shape(config, rng=rng)
                 if not changed:
-                    self._mutate_random_shape(config, effective_rate, rng=rng)
+                    self._mutate_random_shape(config, effective_rate, guide, rng=rng)
             elif roll < config.prob_structural + config.prob_reorder and len(self.shapes) >= 2:
                 i, j = rng.sample(range(len(self.shapes)), 2)
                 self._mark_dirty(i, self.shapes[i].bounding_box(self.width, self.height))
@@ -829,7 +900,7 @@ class Individual:
                 self.invalidate_cache_from(min(i, j))
                 self.fitness = float("inf")
             elif self.shapes:
-                self._mutate_random_shape(config, effective_rate, rng=rng)
+                self._mutate_random_shape(config, effective_rate, guide, rng=rng)
 
     @classmethod
     def random(
