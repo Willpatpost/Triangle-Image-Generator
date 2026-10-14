@@ -499,6 +499,39 @@ def mutate_square(
         _mutate_appearance(square, mode, config, rate, rng=rng)
 
 
+def _voronoi_cell_centroids(
+    sites: list[VoronoiSite],
+    width: int,
+    height: int,
+    stride: int,
+) -> np.ndarray:
+    """Approximate cell centroids from a strided nearest-site grid."""
+    xs = np.arange(0, width, stride, dtype=np.float32)
+    ys = np.arange(0, height, stride, dtype=np.float32)
+    grid_x = xs[None, :]
+    grid_y = ys[:, None]
+    best_index = np.zeros((ys.size, xs.size), dtype=np.int64)
+    best_dist = np.full((ys.size, xs.size), np.inf, dtype=np.float32)
+    for index, site in enumerate(sites):
+        dist = (grid_x - float(site.point[0])) ** 2 + (grid_y - float(site.point[1])) ** 2
+        closer = dist < best_dist
+        best_index[closer] = index
+        np.minimum(best_dist, dist, out=best_dist)
+    flat = best_index.ravel()
+    count = np.bincount(flat, minlength=len(sites))
+    sum_x = np.bincount(flat, weights=np.tile(xs, ys.size), minlength=len(sites))
+    sum_y = np.bincount(flat, weights=np.repeat(ys, xs.size), minlength=len(sites))
+    centroids = np.empty((len(sites), 2), dtype=np.float64)
+    nonzero = count > 0
+    centroids[nonzero, 0] = sum_x[nonzero] / count[nonzero]
+    centroids[nonzero, 1] = sum_y[nonzero] / count[nonzero]
+    for index, site in enumerate(sites):
+        if not nonzero[index]:
+            centroids[index, 0] = float(site.point[0])
+            centroids[index, 1] = float(site.point[1])
+    return centroids
+
+
 def mutate_voronoi_site(
     site: VoronoiSite,
     width: int,
@@ -508,8 +541,26 @@ def mutate_voronoi_site(
     rate: float,
     *,
     rng: random.Random,
+    sites: list[VoronoiSite] | None = None,
 ) -> None:
     if rng.random() < config.voronoi_geometry_probability:
+        if (
+            sites is not None
+            and len(sites) > 1
+            and rng.random() < config.voronoi_lloyd_probability
+        ):
+            centroids = _voronoi_cell_centroids(sites, width, height, config.voronoi_lloyd_stride)
+            index = next(position for position, sibling in enumerate(sites) if sibling is site)
+            target_x, target_y = centroids[index]
+            site.point = np.array(
+                [
+                    clamp_int((int(site.point[0]) + target_x) / 2.0, 0, width - 1),
+                    clamp_int((int(site.point[1]) + target_y) / 2.0, 0, height - 1),
+                ],
+                dtype=np.int32,
+            )
+            site.invalidate_caches()
+            return
         site.point = site.point.copy()
         axis = rng.randrange(2)
         limit = width - 1 if axis == 0 else height - 1
@@ -535,13 +586,16 @@ def mutate_shape(
     rate: float,
     *,
     rng: random.Random,
+    voronoi_sites: list[VoronoiSite] | None = None,
 ) -> None:
     if isinstance(shape, Triangle):
         mutate_triangle(shape, width, height, mode, config, rate, rng=rng)
     elif isinstance(shape, Circle):
         mutate_circle(shape, width, height, mode, config, rate, rng=rng)
     elif isinstance(shape, VoronoiSite):
-        mutate_voronoi_site(shape, width, height, mode, config, rate, rng=rng)
+        mutate_voronoi_site(
+            shape, width, height, mode, config, rate, rng=rng, sites=voronoi_sites
+        )
     else:
         mutate_square(shape, width, height, mode, config, rate, rng=rng)
 
@@ -855,18 +909,23 @@ class Individual:
         if not self.shapes:
             return False
         idx = self._pick_mutation_target(config, guide, rng=rng)
-        old_bbox = self.shapes[idx].bounding_box(self.width, self.height)
+        target = self.shapes[idx]
+        voronoi_sites = None
+        if isinstance(target, VoronoiSite):
+            voronoi_sites = [shape for shape in self.shapes if isinstance(shape, VoronoiSite)]
+        old_bbox = target.bounding_box(self.width, self.height)
         self._mark_dirty(idx, old_bbox)
         mutate_shape(
-            self.shapes[idx],
+            target,
             self.width,
             self.height,
             self.mode,
             config,
             rate,
             rng=rng,
+            voronoi_sites=voronoi_sites,
         )
-        self._mark_dirty(idx, self.shapes[idx].bounding_box(self.width, self.height))
+        self._mark_dirty(idx, target.bounding_box(self.width, self.height))
         self.invalidate_cache_from(idx)
         self.fitness = float("inf")
         return True

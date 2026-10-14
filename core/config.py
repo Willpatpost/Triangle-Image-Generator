@@ -50,6 +50,10 @@ class Config:
     mutate_all_color_channels: bool = False
     voronoi_geometry_probability: float = 0.2
     voronoi_color_sigma_scale: float = 1.5
+    # Lloyd relaxation is off by default: it regressed the voronoi-mode
+    # benchmark because centroid moves serve partition coverage, not color.
+    voronoi_lloyd_probability: float = 0.0
+    voronoi_lloyd_stride: int = 4
 
     # Crossover
     crossover_rate: float = 0.0
@@ -139,6 +143,7 @@ class Config:
             "crossover_rate": self.crossover_rate,
             "target_guided_probability": self.target_guided_probability,
             "voronoi_geometry_probability": self.voronoi_geometry_probability,
+            "voronoi_lloyd_probability": self.voronoi_lloyd_probability,
         }
         for name, value in probabilities.items():
             if not 0.0 <= value <= 1.0:
@@ -157,6 +162,8 @@ class Config:
             raise ValueError("mutation sigmas must be non-negative")
         if self.voronoi_color_sigma_scale < 0:
             raise ValueError("voronoi_color_sigma_scale must be non-negative")
+        if self.voronoi_lloyd_stride < 1:
+            raise ValueError("voronoi_lloyd_stride must be at least 1")
         if not 0 <= self.alpha_min <= 255:
             raise ValueError("alpha_min must be between 0 and 255")
         if not 0 <= self.alpha_max <= 255:

@@ -18,6 +18,12 @@
   16% at 5 s and 34% at 15 s on the structured benchmark (over-exploitation;
   one seed improved sharply), so random probing and uniform targets stay
   the defaults.
+- New opt-in Voronoi Lloyd relaxation, off by default after measurement:
+  `voronoi_lloyd_probability` (default 0) and `voronoi_lloyd_stride` move a
+  site halfway toward its cell centroid instead of Gaussian jitter. On the
+  voronoi-mode structured benchmark it regressed mean best fitness by 5%
+  at 5 s and 9% at 15 s — centroid moves optimize partition geometry, not
+  the target's color boundaries, and displace useful jitter.
 
 ## 2.4.0 — 2026-10-14
 

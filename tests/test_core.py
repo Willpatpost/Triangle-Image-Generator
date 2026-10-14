@@ -46,6 +46,7 @@ from core.shapes import (
     Triangle,
     VoronoiSite,
     mutate_triangle,
+    mutate_voronoi_site,
     random_circle,
     random_square,
     random_triangle,
@@ -106,6 +107,12 @@ class ConfigTests(unittest.TestCase):
     def test_validate_rejects_invalid_guidance_stride(self) -> None:
         with self.assertRaises(ValueError):
             Config(guidance_map_stride=0).validate()
+
+    def test_validate_rejects_invalid_voronoi_lloyd_settings(self) -> None:
+        with self.assertRaises(ValueError):
+            Config(voronoi_lloyd_probability=1.5).validate()
+        with self.assertRaises(ValueError):
+            Config(voronoi_lloyd_stride=0).validate()
 
 
 class FitnessTests(unittest.TestCase):
@@ -681,6 +688,39 @@ class RendererTests(unittest.TestCase):
 
         self.assertEqual(square.alpha, 255)
         self.assertEqual(square.color, 200)
+
+    def test_voronoi_lloyd_relaxation_moves_sites_toward_centroids(self) -> None:
+        config = Config(
+            mode="grayscale",
+            shape_mode="voronoi",
+            voronoi_geometry_probability=1.0,
+            voronoi_lloyd_probability=1.0,
+            voronoi_lloyd_stride=1,
+        )
+        a = VoronoiSite(point=np.array([0, 0], dtype=np.int32), color=10)
+        b = VoronoiSite(point=np.array([15, 15], dtype=np.int32), color=240)
+        sites = [a, b]
+
+        mutate_voronoi_site(a, 16, 16, "grayscale", config, 1.0, rng=random.Random(0), sites=sites)
+
+        # Site a's cell is x + y < 15 with centroid (14/3, 14/3); a moves halfway.
+        self.assertEqual(tuple(a.point), (2, 2))
+        self.assertEqual(tuple(b.point), (15, 15))
+
+    def test_voronoi_lloyd_probability_zero_keeps_jitter(self) -> None:
+        config = Config(
+            mode="grayscale",
+            shape_mode="voronoi",
+            voronoi_geometry_probability=1.0,
+            voronoi_lloyd_probability=0.0,
+            mutation_sigma_points=0.0,
+        )
+        a = VoronoiSite(point=np.array([3, 3], dtype=np.int32), color=10)
+        b = VoronoiSite(point=np.array([12, 12], dtype=np.int32), color=240)
+
+        mutate_voronoi_site(a, 16, 16, "grayscale", config, 1.0, rng=random.Random(0), sites=[a, b])
+
+        self.assertEqual(tuple(a.point), (3, 3))
 
     def test_random_shapes_use_size_divisor(self) -> None:
         rng = random.Random(2)
