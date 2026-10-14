@@ -67,6 +67,7 @@ class EvolutionSession:
         state_path: str,
         *,
         image_path: str | None = None,
+        downsample: int | None = None,
         runtime_overrides: Mapping[str, Any] | None = None,
     ) -> EvolutionSession:
         state = read_state(state_path)
@@ -79,6 +80,11 @@ class EvolutionSession:
             raise FileNotFoundError(f"Source image not found: {source_path}")
         if state.source_sha256 and file_sha256(source_path) != state.source_sha256:
             raise ValueError("The selected source image does not match the image saved with this session.")
+        if downsample is not None and downsample != state.downsample:
+            raise ValueError(
+                f"The session was saved at downsample {state.downsample}, but {downsample} was requested. "
+                "Resume at the saved working resolution, then refine to change it."
+            )
 
         if runtime_overrides:
             invalid = set(runtime_overrides) - RUNTIME_CONFIG_FIELDS
@@ -154,7 +160,8 @@ class EvolutionSession:
         self.global_best = state.best.copy()
         self.global_best.clear_caches(include_shape_masks=False)
         evaluate_fitness(self.global_best, self.reference, self.config, self.background)
-        self.iteration = state.iteration
+        # Version 1 sessions recorded the iteration before stepping.
+        self.iteration = state.iteration + (1 if state.version == 1 else 0)
         self.stagnation = state.stagnation
         self.mutation_rate = state.mutation_rate or self.config.mutation_rate
 

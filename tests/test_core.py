@@ -22,10 +22,16 @@ from core.acceleration import (
 )
 from core.config import Config
 from core.evolver import EvolutionSession
-from core.fitness import evaluate_fitness, evaluate_population, normalized_mse, shape_penalty
+from core.fitness import (
+    evaluate_fitness,
+    evaluate_population,
+    evaluate_population_parallel,
+    normalized_mse,
+    shape_penalty,
+)
 from core.genetic import next_generation
 from core.guidance import EvolutionGuide
-from core.io import load_state, read_state, save_state
+from core.io import EvolutionState, load_state, read_state, save_state
 from core.pipeline import run_evolution, run_progressive_evolution
 from core.renderer import (
     new_canvas,
@@ -517,6 +523,21 @@ class StateTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "newer than"):
                 read_state(str(path))
 
+    def test_rejects_corrupt_session_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "broken.json"
+            path.write_text("{not valid json", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "not valid JSON"):
+                read_state(str(path))
+
+    def test_rejects_session_missing_required_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "incomplete.json"
+            payload = {"version": 2, "iteration": 3, "best_fitness": 0.5}
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "missing required fields"):
+                read_state(str(path))
+
 
 class RendererTests(unittest.TestCase):
     def test_guidance_solves_new_shape_color_against_current_canvas(self) -> None:
@@ -817,6 +838,167 @@ class GeneticTests(unittest.TestCase):
         self.assertTrue(all(individual.fitness == float("inf") for individual in offspring[1:]))
 
 
+class CrossoverTests(unittest.TestCase):
+    @staticmethod
+    def _triangle(color: tuple[int, int, int], alpha: int) -> Triangle:
+        return Triangle(
+            points=np.array([[1, 1], [6, 1], [1, 6]], dtype=np.int32),
+            color=color,
+            alpha=alpha,
+        )
+
+    def test_uniform_crossover_copies_shapes_from_either_parent(self) -> None:
+        random.seed(3)
+        config = Config(
+            mode="color",
+            shape_mode="mixed",
+            nb_elements_initial=2,
+            nb_elements_max=6,
+            min_shapes=1,
+        )
+        parent_a = Individual(
+            width=8,
+            height=8,
+            mode="color",
+            shapes=[
+                self._triangle((10, 20, 30), 200),
+                Circle(center=np.array([4, 4], dtype=np.int32), radius=2, color=(40, 50, 60), alpha=150),
+            ],
+        )
+        parent_b = Individual(
+            width=8,
+            height=8,
+            mode="color",
+            shapes=[
+                self._triangle((110, 20, 30), 100),
+                Circle(center=np.array([5, 5], dtype=np.int32), radius=3, color=(40, 150, 60), alpha=120),
+            ],
+        )
+
+        child = Individual.crossover_uniform(parent_a, parent_b, config)
+
+        self.assertEqual(len(child.shapes), 2)
+        tri = child.shapes[0]
+        assert isinstance(tri, Triangle)
+        self.assertIsNot(tri, parent_a.shapes[0])
+        self.assertIsNot(tri, parent_b.shapes[0])
+        self.assertTrue(
+            np.array_equal(tri.points, parent_a.shapes[0].points)
+            or np.array_equal(tri.points, parent_b.shapes[0].points)
+        )
+        self.assertIn(tri.color, ((10, 20, 30), (110, 20, 30)))
+        self.assertIn(tri.alpha, (200, 100))
+
+        circle = child.shapes[1]
+        assert isinstance(circle, Circle)
+        self.assertIsNot(circle, parent_a.shapes[1])
+        self.assertIsNot(circle, parent_b.shapes[1])
+        self.assertIn(circle.radius, (2, 3))
+        self.assertIn(circle.color, ((40, 50, 60), (40, 150, 60)))
+
+    def test_blend_crossover_interpolates_within_parent_bounds(self) -> None:
+        random.seed(4)
+        config = Config(
+            mode="color",
+            shape_mode="mixed",
+            nb_elements_initial=2,
+            nb_elements_max=6,
+            min_shapes=1,
+        )
+        parent_a = Individual(
+            width=8,
+            height=8,
+            mode="color",
+            shapes=[
+                self._triangle((10, 20, 30), 200),
+                Circle(center=np.array([4, 4], dtype=np.int32), radius=2, color=(40, 50, 60), alpha=150),
+            ],
+        )
+        parent_b = Individual(
+            width=8,
+            height=8,
+            mode="color",
+            shapes=[
+                self._triangle((110, 20, 30), 100),
+                Square(top_left=np.array([3, 3], dtype=np.int32), side=3, color=(140, 150, 160), alpha=120),
+            ],
+        )
+
+        child = Individual.crossover_blend(parent_a, parent_b, config)
+
+        self.assertEqual(len(child.shapes), 2)
+        tri = child.shapes[0]
+        assert isinstance(tri, Triangle)
+        for channel in range(3):
+            low = min(parent_a.shapes[0].color[channel], parent_b.shapes[0].color[channel])
+            high = max(parent_a.shapes[0].color[channel], parent_b.shapes[0].color[channel])
+            self.assertLessEqual(low, tri.color[channel])
+            self.assertGreaterEqual(high, tri.color[channel])
+        self.assertLessEqual(100, tri.alpha)
+        self.assertGreaterEqual(200, tri.alpha)
+        for point_index in range(3):
+            for axis in range(2):
+                a_value = int(parent_a.shapes[0].points[point_index, axis])
+                b_value = int(parent_b.shapes[0].points[point_index, axis])
+                value = int(tri.points[point_index, axis])
+                self.assertLessEqual(min(a_value, b_value), value)
+                self.assertGreaterEqual(max(a_value, b_value), value)
+
+        fallback = child.shapes[1]
+        self.assertIsInstance(fallback, (Circle, Square))
+        if isinstance(fallback, Circle):
+            self.assertEqual(fallback.radius, 2)
+            self.assertEqual(fallback.color, (40, 50, 60))
+        else:
+            self.assertEqual(fallback.side, 3)
+            self.assertEqual(fallback.color, (140, 150, 160))
+
+
+class ParallelEvaluationTests(unittest.TestCase):
+    def test_parallel_evaluation_matches_sequential_and_preserves_parent_caches(self) -> None:
+        reference = np.random.default_rng(11).integers(0, 256, (20, 24, 3), dtype=np.uint8)
+        background = (110, 120, 130)
+        config = Config(
+            mode="color",
+            shape_mode="mixed",
+            pop_size=4,
+            nb_elite=1,
+            nb_elements_initial=4,
+            nb_elements_max=8,
+            min_shapes=1,
+            hill_climb_interval=0,
+            renderer_backend="numpy",
+            parallel_min_pixels=1,
+            max_workers=3,
+        )
+        random.seed(5)
+        parent = Individual.random(24, 20, "color", config, 4)
+        evaluate_fitness(parent, reference, config, background)
+        expected_parent_render = render_individual_float(parent, config, background).copy()
+
+        children = [parent.fork() for _ in range(4)]
+        for child in children:
+            child.mutate(config, rate=1.0)
+        sequential_children = [child.copy() for child in children]
+        for child in sequential_children:
+            child.fitness = float("inf")
+
+        ranked = evaluate_population_parallel(children, reference, config, background, 3)
+        self.assertEqual(len(ranked), 4)
+        parallel_fitness = [child.fitness for child in children]
+        self.assertTrue(all(np.isfinite(value) for value in parallel_fitness))
+
+        evaluate_population(sequential_children, reference, config, background)
+        for parallel_value, sequential_child in zip(parallel_fitness, sequential_children):
+            self.assertAlmostEqual(parallel_value, sequential_child.fitness, places=12)
+
+        np.testing.assert_allclose(
+            render_individual_float(parent, config, background),
+            expected_parent_render,
+            atol=1e-6,
+        )
+
+
 class PipelineTests(unittest.TestCase):
     def test_evolution_session_steps_and_renders_without_saving(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -854,30 +1036,25 @@ class PipelineTests(unittest.TestCase):
                 evaluated_regressed_generation = True
             return [(0, population[0].fitness)]
 
-        with tempfile.TemporaryDirectory() as tmp:
-            config = Config(
-                mode="grayscale",
-                pop_size=2,
-                nb_elite=1,
-                nb_elements_initial=1,
-                nb_elements_max=1,
-                min_shapes=1,
-                max_workers=1,
-                fitness_goal=0.0,
-                stagnation_threshold=10,
-            )
+        config = Config(
+            mode="grayscale",
+            pop_size=2,
+            nb_elite=1,
+            nb_elements_initial=1,
+            nb_elements_max=1,
+            min_shapes=1,
+            max_workers=1,
+            fitness_goal=0.0,
+            stagnation_threshold=10,
+        )
 
-            with (
-                patch(
-                    "core.pipeline.load_reference_image",
-                    return_value=(np.zeros((1, 1), dtype=np.uint8), 255),
-                ),
-                patch("core.pipeline.create_initial_population", return_value=[initial_best]),
-                patch("core.pipeline.next_generation", return_value=[regressed]),
-                patch("core.pipeline.evaluate_population_parallel", side_effect=fake_evaluate_population),
-                patch("core.pipeline.render_individual", return_value=np.zeros((1, 1), dtype=np.uint8)),
-            ):
-                _, fitness = run_evolution("target.png", config, iterations=1)
+        with (
+            patch("core.evolver.load_reference_image", return_value=(np.zeros((1, 1), dtype=np.uint8), 255)),
+            patch("core.evolver.create_initial_population", return_value=[initial_best]),
+            patch("core.evolver.next_generation", return_value=[regressed]),
+            patch("core.evolver.evaluate_population_parallel", side_effect=fake_evaluate_population),
+        ):
+            _, fitness = run_evolution("target.png", config, iterations=1)
 
         self.assertEqual(fitness, 0.1)
 
@@ -964,6 +1141,82 @@ class PipelineTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "does not match"):
                 EvolutionSession.from_state(str(state_path), image_path=str(other))
+
+    def test_run_evolution_requires_an_existing_resume_file(self) -> None:
+        config = Config(
+            mode="grayscale",
+            pop_size=2,
+            nb_elite=1,
+            nb_elements_initial=1,
+            nb_elements_max=1,
+            min_shapes=1,
+            hill_climb_interval=0,
+            max_workers=1,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "missing.json"
+            with self.assertRaises(FileNotFoundError):
+                run_evolution("target.png", config, iterations=1, resume_path=str(missing))
+
+    def test_run_evolution_resumes_a_saved_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "target.png"
+            target = np.zeros((8, 8), dtype=np.uint8)
+            target[2:6, 2:6] = 220
+            Image.fromarray(target, mode="L").save(image_path)
+            config = Config(
+                mode="grayscale",
+                shape_mode="mixed",
+                pop_size=4,
+                nb_elite=1,
+                nb_elements_initial=2,
+                nb_elements_max=8,
+                min_shapes=1,
+                hill_climb_interval=0,
+                max_workers=1,
+            )
+            session = EvolutionSession(str(image_path), config, seed=19)
+            session.step_many(3)
+            state_path = Path(tmp) / "session.json"
+            session.save(str(state_path))
+
+            rendered, fitness = run_evolution(
+                str(image_path),
+                config,
+                iterations=session.iteration + 3,
+                resume_path=str(state_path),
+            )
+
+            self.assertEqual(rendered.shape, (8, 8))
+            self.assertTrue(np.isfinite(fitness))
+            self.assertLessEqual(fitness, session.global_best.fitness + 1e-12)
+
+    def test_version_one_sessions_resume_with_adjusted_iteration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "target.png"
+            Image.fromarray(np.zeros((4, 4), dtype=np.uint8), mode="L").save(image_path)
+            config = Config(
+                mode="grayscale",
+                pop_size=4,
+                nb_elite=1,
+                nb_elements_initial=1,
+                nb_elements_max=2,
+                min_shapes=1,
+                hill_climb_interval=0,
+                max_workers=1,
+            )
+            for version, expected_iteration in ((1, 5), (2, 4)):
+                with self.subTest(version=version):
+                    state = EvolutionState(
+                        iteration=4,
+                        best_fitness=0.5,
+                        best=Individual(width=4, height=4, mode="grayscale", shapes=[]),
+                        config=config,
+                        background=255,
+                        version=version,
+                    )
+                    session = EvolutionSession(str(image_path), config, _resume_state=state)
+                    self.assertEqual(session.iteration, expected_iteration)
 
 
 if __name__ == "__main__":

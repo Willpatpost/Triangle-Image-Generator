@@ -39,6 +39,8 @@ tests/                         Unit and integration tests
 pyproject.toml                 Package metadata and GUI entry point
 requirements.txt               Base dependencies
 requirements-acceleration.txt  Optional Numba dependency
+CHANGELOG.md                   Release notes
+LICENSE                        MIT license
 ```
 
 ## Engine API

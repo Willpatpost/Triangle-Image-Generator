@@ -236,13 +236,28 @@ def save_state(
 
 def read_state(path: str) -> EvolutionState:
     with open(path, encoding="utf-8") as handle:
-        payload = json.load(handle)
+        try:
+            payload = json.load(handle)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"The session file is not valid JSON: {path}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("The session file does not contain a session object.")
 
     version = int(payload.get("version", 1))
     if version > STATE_VERSION:
         raise ValueError(
             f"Session version {version} is newer than the supported version {STATE_VERSION}."
         )
+
+    missing = [
+        field
+        for field in ("iteration", "best_fitness", "background", "config")
+        if field not in payload
+    ]
+    if "best" not in payload and "triangles" not in payload:
+        missing.append("best")
+    if missing:
+        raise ValueError(f"The session file is missing required fields: {', '.join(missing)}")
 
     config_fields = {f.name for f in Config.__dataclass_fields__.values()}
     raw_config = dict(payload["config"])
