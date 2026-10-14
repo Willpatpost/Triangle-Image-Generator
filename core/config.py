@@ -95,6 +95,8 @@ class Config:
     hill_climb_attempts: int = 3
     elite_candidates: int = 2  # fork-and-mutate candidates of the best individual injected every generation
     elite_candidate_rate: float = 0.5  # mutation-rate scale applied to elite candidates
+    restart_stagnation_threshold: int = 2000  # 0 disables diversity restarts
+    mutation_anneal_iterations: int = 0  # 0 disables mutation-rate annealing
 
     # Parallelism
     max_workers: int = 0  # 0 = auto, capped at four cache-preserving threads
@@ -135,6 +137,10 @@ class Config:
             raise ValueError("elite_candidates must be 0 or greater")
         if self.elite_candidate_rate < 0:
             raise ValueError("elite_candidate_rate must be 0 or greater")
+        if self.restart_stagnation_threshold < 0:
+            raise ValueError("restart_stagnation_threshold must be 0 or greater")
+        if self.mutation_anneal_iterations < 0:
+            raise ValueError("mutation_anneal_iterations must be 0 or greater")
         probabilities = {
             "prob_structural": self.prob_structural,
             "prob_add_vs_del": self.prob_add_vs_del,

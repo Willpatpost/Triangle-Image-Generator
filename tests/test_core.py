@@ -114,6 +114,12 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Config(voronoi_lloyd_stride=0).validate()
 
+    def test_validate_rejects_negative_stagnation_controls(self) -> None:
+        with self.assertRaises(ValueError):
+            Config(restart_stagnation_threshold=-1).validate()
+        with self.assertRaises(ValueError):
+            Config(mutation_anneal_iterations=-1).validate()
+
 
 class FitnessTests(unittest.TestCase):
     def test_normalized_mse_is_independent_of_image_size(self) -> None:
@@ -1512,6 +1518,59 @@ class PipelineTests(unittest.TestCase):
 
             self.assertEqual(spy.call_count, 1)
             self.assertEqual(len(session.population), 4)
+
+    def test_diversity_restart_reseeds_after_stagnation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "target.png"
+            target = np.zeros((8, 8), dtype=np.uint8)
+            target[2:6, 2:6] = 220
+            Image.fromarray(target, mode="L").save(image_path)
+            config = Config(
+                mode="grayscale",
+                shape_mode="mixed",
+                pop_size=4,
+                nb_elite=1,
+                nb_elements_initial=2,
+                nb_elements_max=8,
+                min_shapes=1,
+                hill_climb_interval=0,
+                max_workers=1,
+                restart_stagnation_threshold=2,
+            )
+            session = EvolutionSession(str(image_path), config, seed=5)
+            session.stagnation = 2
+
+            with patch("core.evolver.Individual.random", side_effect=Individual.random) as spy:
+                session.step()
+
+            self.assertGreaterEqual(spy.call_count, 1)
+            self.assertEqual(len(session.population), 4)
+            self.assertLessEqual(session.stagnation, 1)
+
+    def test_mutation_anneal_scales_the_step_rate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "target.png"
+            Image.fromarray(np.zeros((4, 4), dtype=np.uint8), mode="L").save(image_path)
+            config = Config(
+                mode="grayscale",
+                shape_mode="mixed",
+                pop_size=4,
+                nb_elite=1,
+                nb_elements_initial=2,
+                nb_elements_max=8,
+                min_shapes=1,
+                hill_climb_interval=0,
+                max_workers=1,
+                mutation_anneal_iterations=100,
+            )
+            session = EvolutionSession(str(image_path), config, seed=3)
+            session.iteration = 50
+
+            with patch("core.evolver.next_generation", side_effect=next_generation) as spy:
+                session.step()
+
+            self.assertEqual(spy.call_count, 1)
+            self.assertAlmostEqual(spy.call_args.args[3], 0.5)
 
 
 if __name__ == "__main__":

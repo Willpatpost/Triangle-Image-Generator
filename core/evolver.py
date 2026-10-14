@@ -206,11 +206,51 @@ class EvolutionSession:
         self.stagnation = 0
         self.mutation_rate = self.config.mutation_rate
 
+    def _restart_population(self) -> None:
+        """Reseed the population around its elites after deep stagnation."""
+        keep = min(self.config.nb_elite, len(self.population))
+        retained = [self.population[index] for index, _ in self.ranked[:keep]]
+        initial_guide = EvolutionGuide.from_background(
+            self.reference, self.background, error_stride=self.config.guidance_map_stride
+        )
+        height, width = self.reference.shape[:2]
+        while len(retained) < self.config.pop_size:
+            retained.append(
+                Individual.random(
+                    width,
+                    height,
+                    self.config.mode,
+                    self.config,
+                    self.config.nb_elements_initial,
+                    initial_guide,
+                    rng=self._rng,
+                )
+            )
+        self.population = retained
+        self.ranked = evaluate_population_parallel(
+            self.population,
+            self.reference,
+            self.config,
+            self.background,
+            self.config.max_workers,
+        )
+        self.stagnation = 0
+
     def step(self) -> EvolutionSnapshot:
         if self.stagnation > self.config.stagnation_threshold // 4:
             self.mutation_rate = min(self.config.mutation_rate * self.config.adaptive_mutation_boost, 3.0)
         else:
             self.mutation_rate = self.config.mutation_rate
+
+        if (
+            self.config.restart_stagnation_threshold > 0
+            and self.stagnation >= self.config.restart_stagnation_threshold
+        ):
+            self._restart_population()
+
+        if self.config.mutation_anneal_iterations > 0:
+            scale = max(0.25, 1.0 - self.iteration / self.config.mutation_anneal_iterations)
+            self.mutation_rate = self.mutation_rate * scale
 
         baseline = render_individual_float(self.global_best, self.config, self.background)
         guide = EvolutionGuide(

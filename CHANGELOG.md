@@ -24,6 +24,14 @@
   voronoi-mode structured benchmark it regressed mean best fitness by 5%
   at 5 s and 9% at 15 s — centroid moves optimize partition geometry, not
   the target's color boundaries, and displace useful jitter.
+- Stagnation now ends in a diversity restart: after
+  `restart_stagnation_threshold` (default 2000) consecutive non-improving
+  generations the population is reseeded around its elites (0 disables).
+  Short-horizon benchmarks cannot reach the threshold, so the default
+  rests on design grounds, not measurement.
+- Optional mutation annealing (`mutation_anneal_iterations`, default 0):
+  the per-step mutation rate scales linearly down to a 25% floor across
+  the configured iteration span.
 
 ## 2.4.0 — 2026-10-14
 
