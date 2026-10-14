@@ -87,6 +87,14 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Config(renderer_backend="metal").validate()  # type: ignore[arg-type]
 
+    def test_validate_rejects_invalid_voronoi_settings(self) -> None:
+        with self.assertRaises(ValueError):
+            Config(voronoi_geometry_probability=1.5).validate()
+        with self.assertRaises(ValueError):
+            Config(voronoi_geometry_probability=-0.1).validate()
+        with self.assertRaises(ValueError):
+            Config(voronoi_color_sigma_scale=-0.5).validate()
+
 
 class FitnessTests(unittest.TestCase):
     def test_normalized_mse_is_independent_of_image_size(self) -> None:
@@ -213,8 +221,12 @@ class FitnessTests(unittest.TestCase):
         self.assertAlmostEqual(incremental_fitness, full_fitness, places=12)
 
         removed = parent.fork()
-        with patch("core.shapes.random.randint", return_value=1):
-            self.assertTrue(removed.remove_random_shape(config))
+
+        class _SecondShapeRng(random.Random):
+            def randint(self, a: int, b: int) -> int:
+                return 1
+
+        self.assertTrue(removed.remove_random_shape(config, rng=_SecondShapeRng()))
         removed_full = removed.copy()
         removed_full.clear_caches()
         removed_result = render_individual_for_scoring(removed.copy(), config, background)
@@ -538,6 +550,53 @@ class StateTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "missing required fields"):
                 read_state(str(path))
 
+    def test_voronoi_sites_round_trip_without_alpha(self) -> None:
+        individual = Individual(
+            width=4,
+            height=4,
+            mode="grayscale",
+            shapes=[VoronoiSite(point=np.array([1, 1], dtype=np.int32), color=90)],
+            fitness=0.3,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.json"
+            save_state(
+                str(path),
+                iteration=1,
+                best=individual,
+                best_fitness=0.3,
+                config=Config(shape_mode="voronoi"),
+                background=255,
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertNotIn("alpha", payload["best"]["shapes"][0])
+            state = read_state(str(path))
+
+        self.assertIsInstance(state.best.shapes[0], VoronoiSite)
+        self.assertEqual(state.best.shapes[0].color, 90)
+
+    def test_voronoi_payload_with_legacy_alpha_still_loads(self) -> None:
+        payload = {
+            "version": 2,
+            "iteration": 2,
+            "best_fitness": 0.4,
+            "background": 255,
+            "config": {"shape_mode": "voronoi"},
+            "best": {
+                "width": 4,
+                "height": 4,
+                "mode": "grayscale",
+                "shapes": [{"kind": "voronoi", "point": [1, 1], "color": 90, "alpha": 40}],
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy-alpha.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            state = read_state(str(path))
+
+        self.assertIsInstance(state.best.shapes[0], VoronoiSite)
+        self.assertEqual(state.best.shapes[0].color, 90)
+
 
 class RendererTests(unittest.TestCase):
     def test_guidance_solves_new_shape_color_against_current_canvas(self) -> None:
@@ -545,15 +604,15 @@ class RendererTests(unittest.TestCase):
         baseline = np.array([[[0, 20, 40]]], dtype=np.float32)
         guide = EvolutionGuide(reference, baseline)
 
-        self.assertEqual(guide.sample_high_error_point(4), (0, 0))
+        self.assertEqual(guide.sample_high_error_point(4, rng=random.Random(0)), (0, 0))
         self.assertEqual(guide.optimal_color(0, 0, 0.5, "color"), (200, 220, 240))
 
     def test_random_shapes_use_size_divisor(self) -> None:
-        random.seed(2)
+        rng = random.Random(2)
         config = Config(mode="grayscale", new_shape_size_divisor=5.0)
-        triangle = random_triangle(100, 100, "grayscale", config)
-        circle = random_circle(100, 100, "grayscale", config)
-        square = random_square(100, 100, "grayscale", config)
+        triangle = random_triangle(100, 100, "grayscale", config, rng=rng)
+        circle = random_circle(100, 100, "grayscale", config, rng=rng)
+        square = random_square(100, 100, "grayscale", config, rng=rng)
 
         min_x, min_y, max_x, max_y = triangle.bounding_box(100, 100)
         self.assertLessEqual(max_x - min_x, 40)
@@ -596,8 +655,42 @@ class RendererTests(unittest.TestCase):
 
         self.assertEqual(rendered[0, 0], 102)
 
+    def test_cached_final_render_is_read_only(self) -> None:
+        individual = Individual(
+            width=6,
+            height=6,
+            mode="grayscale",
+            shapes=[
+                Square(top_left=np.array([0, 0], dtype=np.int32), side=4, color=90, alpha=200)
+            ],
+        )
+        config = Config(
+            mode="grayscale",
+            shape_mode="square",
+            use_compositing_cache=True,
+            compositing_cache_stride=1,
+        )
+
+        rendered = render_individual_float(individual, config, 255)
+
+        self.assertFalse(rendered.flags.writeable)
+        self.assertIs(individual._compositing_cache[-1], rendered)
+
+    def test_mode_mismatch_raises_type_error(self) -> None:
+        individual = Individual(
+            width=2,
+            height=2,
+            mode="grayscale",
+            shapes=[
+                Square(top_left=np.array([0, 0], dtype=np.int32), side=1, color=(10, 20, 30), alpha=255)
+            ],
+        )
+
+        with self.assertRaises(TypeError):
+            render_individual(individual, Config(mode="grayscale", shape_mode="square"), 255)
+
     def test_color_mutation_changes_at_most_one_rgb_channel_by_default(self) -> None:
-        random.seed(1)
+        rng = random.Random(1)
         triangle = Triangle(
             points=np.array([[0, 0], [1, 0], [0, 1]], dtype=np.int32),
             color=(100, 100, 100),
@@ -610,7 +703,7 @@ class RendererTests(unittest.TestCase):
             mutation_sigma_alpha=25,
         )
 
-        mutate_triangle(triangle, width=4, height=4, mode="color", config=config, rate=1.0)
+        mutate_triangle(triangle, width=4, height=4, mode="color", config=config, rate=1.0, rng=rng)
 
         assert isinstance(triangle.color, tuple)
         changed_channels = sum(value != 100 for value in triangle.color)
@@ -728,6 +821,7 @@ class RendererTests(unittest.TestCase):
             "grayscale",
             Config(mode="grayscale", prob_mutate_geometry=1.0),
             1.0,
+            rng=random.Random(0),
         )
         self.assertIsNone(copied.shapes[0]._mask_cache)
 
@@ -792,6 +886,7 @@ class GeneticTests(unittest.TestCase):
                 prob_mutate_geometry=1.0,
             ),
             rate=1.0,
+            rng=random.Random(0),
         )
 
         self.assertIsNot(child.shapes[0].points, parent.shapes[0].points)
@@ -832,7 +927,7 @@ class GeneticTests(unittest.TestCase):
             crossover_rate=0.0,
         )
 
-        offspring = next_generation(population, ranked, config, 1.0, True)
+        offspring = next_generation(population, ranked, config, 1.0, True, rng=random.Random(0))
 
         self.assertEqual(offspring[0].fitness, 0.1)
         self.assertTrue(all(individual.fitness == float("inf") for individual in offspring[1:]))
@@ -848,7 +943,7 @@ class CrossoverTests(unittest.TestCase):
         )
 
     def test_uniform_crossover_copies_shapes_from_either_parent(self) -> None:
-        random.seed(3)
+        rng = random.Random(3)
         config = Config(
             mode="color",
             shape_mode="mixed",
@@ -875,7 +970,7 @@ class CrossoverTests(unittest.TestCase):
             ],
         )
 
-        child = Individual.crossover_uniform(parent_a, parent_b, config)
+        child = Individual.crossover_uniform(parent_a, parent_b, config, rng=rng)
 
         self.assertEqual(len(child.shapes), 2)
         tri = child.shapes[0]
@@ -897,7 +992,7 @@ class CrossoverTests(unittest.TestCase):
         self.assertIn(circle.color, ((40, 50, 60), (40, 150, 60)))
 
     def test_blend_crossover_interpolates_within_parent_bounds(self) -> None:
-        random.seed(4)
+        rng = random.Random(4)
         config = Config(
             mode="color",
             shape_mode="mixed",
@@ -924,7 +1019,7 @@ class CrossoverTests(unittest.TestCase):
             ],
         )
 
-        child = Individual.crossover_blend(parent_a, parent_b, config)
+        child = Individual.crossover_blend(parent_a, parent_b, config, rng=rng)
 
         self.assertEqual(len(child.shapes), 2)
         tri = child.shapes[0]
@@ -971,14 +1066,14 @@ class ParallelEvaluationTests(unittest.TestCase):
             parallel_min_pixels=1,
             max_workers=3,
         )
-        random.seed(5)
-        parent = Individual.random(24, 20, "color", config, 4)
+        rng = random.Random(5)
+        parent = Individual.random(24, 20, "color", config, 4, rng=rng)
         evaluate_fitness(parent, reference, config, background)
         expected_parent_render = render_individual_float(parent, config, background).copy()
 
         children = [parent.fork() for _ in range(4)]
         for child in children:
-            child.mutate(config, rate=1.0)
+            child.mutate(config, rate=1.0, rng=rng)
         sequential_children = [child.copy() for child in children]
         for child in sequential_children:
             child.fitness = float("inf")

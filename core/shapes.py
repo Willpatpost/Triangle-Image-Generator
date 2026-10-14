@@ -134,14 +134,12 @@ class Square:
 class VoronoiSite:
     point: np.ndarray  # shape (2,), int
     color: int | tuple[int, int, int]
-    alpha: int = 255
     _mask_cache: MaskCache | None = field(default=None, repr=False, compare=False)
 
     def copy(self) -> VoronoiSite:
         return VoronoiSite(
             point=self.point.copy(),
             color=self.color,
-            alpha=self.alpha,
             _mask_cache=self._mask_cache,
         )
 
@@ -149,7 +147,6 @@ class VoronoiSite:
         return VoronoiSite(
             point=self.point,
             color=self.color,
-            alpha=self.alpha,
             _mask_cache=self._mask_cache,
         )
 
@@ -173,13 +170,13 @@ def shape_kind(shape: Shape) -> str:
     return "square"
 
 
-def _random_color(mode: ColorMode) -> int | tuple[int, int, int]:
+def _random_color(mode: ColorMode, rng: random.Random) -> int | tuple[int, int, int]:
     if mode == "grayscale":
-        return random.randint(0, 255)
+        return rng.randint(0, 255)
     return (
-        random.randint(0, 255),
-        random.randint(0, 255),
-        random.randint(0, 255),
+        rng.randint(0, 255),
+        rng.randint(0, 255),
+        rng.randint(0, 255),
     )
 
 
@@ -188,16 +185,18 @@ def _choose_anchor(
     height: int,
     config: Config,
     guide: EvolutionGuide | None,
+    *,
+    rng: random.Random,
 ) -> tuple[int, int, bool]:
     guided = (
         guide is not None
         and config.target_guided_shapes
-        and random.random() < config.target_guided_probability
+        and rng.random() < config.target_guided_probability
     )
     if guided:
-        x, y = guide.sample_high_error_point(config.target_guidance_candidates)
+        x, y = guide.sample_high_error_point(config.target_guidance_candidates, rng=rng)
         return x, y, True
-    return random.randint(0, width - 1), random.randint(0, height - 1), False
+    return rng.randint(0, width - 1), rng.randint(0, height - 1), False
 
 
 def _new_shape_color(
@@ -208,9 +207,11 @@ def _new_shape_color(
     y: int,
     alpha: int,
     guided: bool,
+    *,
+    rng: random.Random,
 ) -> int | tuple[int, int, int]:
     if guide is None or not guided:
-        return _random_color(mode)
+        return _random_color(mode, rng)
     alpha_factor = config.fixed_alpha if 0.0 <= config.fixed_alpha <= 1.0 else alpha / 255.0
     return guide.optimal_color(x, y, alpha_factor, mode)
 
@@ -220,55 +221,66 @@ def _mutate_color(
     mode: ColorMode,
     config: Config,
     scale: float,
+    *,
+    rng: random.Random,
     channel: int | None = None,
 ) -> int | tuple[int, int, int]:
     if mode == "grayscale":
-        assert isinstance(color, int)
+        if not isinstance(color, int):
+            raise TypeError(f"grayscale mode requires int colors, got {type(color).__name__}")
         return clamp_int(
-            color + random.gauss(0, 1) * config.mutation_sigma_color * scale,
+            color + rng.gauss(0, 1) * config.mutation_sigma_color * scale,
             0,
             255,
         )
 
-    assert isinstance(color, tuple)
+    if not isinstance(color, tuple):
+        raise TypeError(f"color mode requires (r, g, b) tuple colors, got {type(color).__name__}")
     channels = list(color)
     if config.mutate_all_color_channels:
         return tuple(
-            clamp_int(c + random.gauss(0, 1) * config.mutation_sigma_color * scale, 0, 255)
+            clamp_int(c + rng.gauss(0, 1) * config.mutation_sigma_color * scale, 0, 255)
             for c in channels
         )
 
     if channel is None:
-        channel = random.randint(0, 2)
+        channel = rng.randint(0, 2)
     channels[channel] = clamp_int(
-        channels[channel] + random.gauss(0, 1) * config.mutation_sigma_color * scale,
+        channels[channel] + rng.gauss(0, 1) * config.mutation_sigma_color * scale,
         0,
         255,
     )
     return tuple(channels)
 
 
-def _mutate_appearance(shape: Shape, mode: ColorMode, config: Config, scale: float) -> None:
+def _mutate_appearance(
+    shape: Shape,
+    mode: ColorMode,
+    config: Config,
+    scale: float,
+    *,
+    rng: random.Random,
+) -> None:
     if mode == "grayscale":
-        if random.random() < 0.5:
-            shape.color = _mutate_color(shape.color, mode, config, scale)
+        if rng.random() < 0.5:
+            shape.color = _mutate_color(shape.color, mode, config, scale, rng=rng)
         else:
             shape.alpha = clamp_int(
-                shape.alpha + random.gauss(0, 1) * config.mutation_sigma_alpha * scale,
+                shape.alpha + rng.gauss(0, 1) * config.mutation_sigma_alpha * scale,
                 config.alpha_min,
                 config.alpha_max,
             )
         return
 
-    slot = random.randint(0, 3)
+    slot = rng.randint(0, 3)
     if slot == 3:
         shape.alpha = clamp_int(
-            shape.alpha + random.gauss(0, 1) * config.mutation_sigma_alpha * scale,
+            shape.alpha + rng.gauss(0, 1) * config.mutation_sigma_alpha * scale,
             config.alpha_min,
             config.alpha_max,
         )
     else:
-        shape.color = _mutate_color(shape.color, mode, config, scale, channel=slot)
+        shape.color = _mutate_color(shape.color, mode, config, scale, rng=rng, channel=slot)
 
 
 def random_triangle(
@@ -277,20 +289,22 @@ def random_triangle(
     mode: ColorMode,
     config: Config,
     guide: EvolutionGuide | None = None,
+    *,
+    rng: random.Random,
 ) -> Triangle:
     max_span = max(1, int(min(width, height) / config.new_shape_size_divisor))
-    center_x, center_y, guided = _choose_anchor(width, height, config, guide)
+    center_x, center_y, guided = _choose_anchor(width, height, config, guide, rng=rng)
     points = []
     for _ in range(3):
         points.append(
             [
-                clamp_int(center_x + random.randint(-max_span, max_span), 0, width - 1),
-                clamp_int(center_y + random.randint(-max_span, max_span), 0, height - 1),
+                clamp_int(center_x + rng.randint(-max_span, max_span), 0, width - 1),
+                clamp_int(center_y + rng.randint(-max_span, max_span), 0, height - 1),
             ]
         )
     points = np.array(points, dtype=np.int32)
-    alpha = random.randint(config.alpha_min, config.alpha_max)
-    color = _new_shape_color(mode, config, guide, center_x, center_y, alpha, guided)
+    alpha = rng.randint(config.alpha_min, config.alpha_max)
+    color = _new_shape_color(mode, config, guide, center_x, center_y, alpha, guided, rng=rng)
     return Triangle(points=points, color=color, alpha=alpha)
 
 
@@ -300,13 +314,15 @@ def random_circle(
     mode: ColorMode,
     config: Config,
     guide: EvolutionGuide | None = None,
+    *,
+    rng: random.Random,
 ) -> Circle:
     max_radius = max(1, int(min(width, height) / config.new_shape_size_divisor))
-    center_x, center_y, guided = _choose_anchor(width, height, config, guide)
+    center_x, center_y, guided = _choose_anchor(width, height, config, guide, rng=rng)
     center = np.array([center_x, center_y], dtype=np.int32)
-    radius = random.randint(1, max_radius)
-    alpha = random.randint(config.alpha_min, config.alpha_max)
-    color = _new_shape_color(mode, config, guide, center_x, center_y, alpha, guided)
+    radius = rng.randint(1, max_radius)
+    alpha = rng.randint(config.alpha_min, config.alpha_max)
+    color = _new_shape_color(mode, config, guide, center_x, center_y, alpha, guided, rng=rng)
     return Circle(center=center, radius=radius, color=color, alpha=alpha)
 
 
@@ -316,18 +332,20 @@ def random_square(
     mode: ColorMode,
     config: Config,
     guide: EvolutionGuide | None = None,
+    *,
+    rng: random.Random,
 ) -> Square:
     max_side = max(1, int(min(width, height) / config.new_shape_size_divisor))
-    side = random.randint(1, max_side)
+    side = rng.randint(1, max_side)
     max_x = max(0, width - side)
     max_y = max(0, height - side)
-    center_x, center_y, guided = _choose_anchor(width, height, config, guide)
+    center_x, center_y, guided = _choose_anchor(width, height, config, guide, rng=rng)
     top_left = np.array([
         clamp_int(center_x - side / 2, 0, max_x),
         clamp_int(center_y - side / 2, 0, max_y),
     ], dtype=np.int32)
-    alpha = random.randint(config.alpha_min, config.alpha_max)
-    color = _new_shape_color(mode, config, guide, center_x, center_y, alpha, guided)
+    alpha = rng.randint(config.alpha_min, config.alpha_max)
+    color = _new_shape_color(mode, config, guide, center_x, center_y, alpha, guided, rng=rng)
     return Square(top_left=top_left, side=side, color=color, alpha=alpha)
 
 
@@ -337,10 +355,12 @@ def random_voronoi_site(
     mode: ColorMode,
     config: Config,
     guide: EvolutionGuide | None = None,
+    *,
+    rng: random.Random,
 ) -> VoronoiSite:
-    x, y, guided = _choose_anchor(width, height, config, guide)
+    x, y, guided = _choose_anchor(width, height, config, guide, rng=rng)
     point = np.array([x, y], dtype=np.int32)
-    color = _new_shape_color(mode, config, guide, x, y, 255, guided)
+    color = _new_shape_color(mode, config, guide, x, y, 255, guided, rng=rng)
     return VoronoiSite(point=point, color=color)
 
 
@@ -351,37 +371,59 @@ def random_shape(
     shape_mode: ShapeMode,
     config: Config,
     guide: EvolutionGuide | None = None,
+    *,
+    rng: random.Random,
 ) -> Shape:
     kind = shape_mode
     if kind == "mixed":
-        kind = random.choice(("triangle", "circle", "square"))
+        # Voronoi genomes render as one full-canvas partition, so they cannot
+        # combine with layered shapes inside a single genome.
+        kind = rng.choice(("triangle", "circle", "square"))
     if kind == "voronoi":
-        return random_voronoi_site(width, height, mode, config, guide)
+        return random_voronoi_site(width, height, mode, config, guide, rng=rng)
     if kind == "circle":
-        return random_circle(width, height, mode, config, guide)
+        return random_circle(width, height, mode, config, guide, rng=rng)
     if kind == "square":
-        return random_square(width, height, mode, config, guide)
-    return random_triangle(width, height, mode, config, guide)
+        return random_square(width, height, mode, config, guide, rng=rng)
+    return random_triangle(width, height, mode, config, guide, rng=rng)
 
 
-def mutate_triangle(tri: Triangle, width: int, height: int, mode: ColorMode, config: Config, rate: float) -> None:
-    if random.random() < config.prob_mutate_geometry:
+def mutate_triangle(
+    tri: Triangle,
+    width: int,
+    height: int,
+    mode: ColorMode,
+    config: Config,
+    rate: float,
+    *,
+    rng: random.Random,
+) -> None:
+    if rng.random() < config.prob_mutate_geometry:
         tri.points = tri.points.copy()
-        point = random.randrange(3)
-        axis = random.randrange(2)
+        point = rng.randrange(3)
+        axis = rng.randrange(2)
         limit = width - 1 if axis == 0 else height - 1
-        delta = random.gauss(0, 1) * config.mutation_sigma_points * rate
+        delta = rng.gauss(0, 1) * config.mutation_sigma_points * rate
         tri.points[point, axis] = clamp_int(tri.points[point, axis] + delta, 0, limit)
         tri.invalidate_caches()
     else:
-        _mutate_appearance(tri, mode, config, rate)
+        _mutate_appearance(tri, mode, config, rate, rng=rng)
 
 
-def mutate_circle(circle: Circle, width: int, height: int, mode: ColorMode, config: Config, rate: float) -> None:
-    if random.random() < config.prob_mutate_geometry:
+def mutate_circle(
+    circle: Circle,
+    width: int,
+    height: int,
+    mode: ColorMode,
+    config: Config,
+    rate: float,
+    *,
+    rng: random.Random,
+) -> None:
+    if rng.random() < config.prob_mutate_geometry:
         circle.center = circle.center.copy()
-        slot = random.randrange(3)
-        delta = random.gauss(0, 1) * config.mutation_sigma_points * rate
+        slot = rng.randrange(3)
+        delta = rng.gauss(0, 1) * config.mutation_sigma_points * rate
         if slot < 2:
             limit = width - 1 if slot == 0 else height - 1
             circle.center[slot] = clamp_int(circle.center[slot] + delta, 0, limit)
@@ -389,14 +431,23 @@ def mutate_circle(circle: Circle, width: int, height: int, mode: ColorMode, conf
             circle.radius = clamp_int(circle.radius + delta, 1, max(1, min(width, height) // 2))
         circle.invalidate_caches()
     else:
-        _mutate_appearance(circle, mode, config, rate)
+        _mutate_appearance(circle, mode, config, rate, rng=rng)
 
 
-def mutate_square(square: Square, width: int, height: int, mode: ColorMode, config: Config, rate: float) -> None:
-    if random.random() < config.prob_mutate_geometry:
+def mutate_square(
+    square: Square,
+    width: int,
+    height: int,
+    mode: ColorMode,
+    config: Config,
+    rate: float,
+    *,
+    rng: random.Random,
+) -> None:
+    if rng.random() < config.prob_mutate_geometry:
         square.top_left = square.top_left.copy()
-        slot = random.randrange(3)
-        delta = random.gauss(0, 1) * config.mutation_sigma_points * rate
+        slot = rng.randrange(3)
+        delta = rng.gauss(0, 1) * config.mutation_sigma_points * rate
         if slot == 0:
             square.top_left[0] = clamp_int(square.top_left[0] + delta, 0, max(0, width - square.side))
         elif slot == 1:
@@ -406,7 +457,7 @@ def mutate_square(square: Square, width: int, height: int, mode: ColorMode, conf
             square.side = clamp_int(square.side + delta, 1, max_side)
         square.invalidate_caches()
     else:
-        _mutate_appearance(square, mode, config, rate)
+        _mutate_appearance(square, mode, config, rate, rng=rng)
 
 
 def mutate_voronoi_site(
@@ -416,41 +467,69 @@ def mutate_voronoi_site(
     mode: ColorMode,
     config: Config,
     rate: float,
+    *,
+    rng: random.Random,
 ) -> None:
-    if random.random() < 0.2:
+    if rng.random() < config.voronoi_geometry_probability:
         site.point = site.point.copy()
-        axis = random.randrange(2)
+        axis = rng.randrange(2)
         limit = width - 1 if axis == 0 else height - 1
-        delta = random.gauss(0, 1) * config.mutation_sigma_points * rate
+        delta = rng.gauss(0, 1) * config.mutation_sigma_points * rate
         site.point[axis] = clamp_int(site.point[axis] + delta, 0, limit)
         site.invalidate_caches()
     else:
-        site.color = _mutate_color(site.color, mode, config, rate * 1.5)
+        site.color = _mutate_color(
+            site.color,
+            mode,
+            config,
+            rate * config.voronoi_color_sigma_scale,
+            rng=rng,
+        )
 
 
-def mutate_shape(shape: Shape, width: int, height: int, mode: ColorMode, config: Config, rate: float) -> None:
+def mutate_shape(
+    shape: Shape,
+    width: int,
+    height: int,
+    mode: ColorMode,
+    config: Config,
+    rate: float,
+    *,
+    rng: random.Random,
+) -> None:
     if isinstance(shape, Triangle):
-        mutate_triangle(shape, width, height, mode, config, rate)
+        mutate_triangle(shape, width, height, mode, config, rate, rng=rng)
     elif isinstance(shape, Circle):
-        mutate_circle(shape, width, height, mode, config, rate)
+        mutate_circle(shape, width, height, mode, config, rate, rng=rng)
     elif isinstance(shape, VoronoiSite):
-        mutate_voronoi_site(shape, width, height, mode, config, rate)
+        mutate_voronoi_site(shape, width, height, mode, config, rate, rng=rng)
     else:
-        mutate_square(shape, width, height, mode, config, rate)
+        mutate_square(shape, width, height, mode, config, rate, rng=rng)
 
 
-def blend_triangles(a: Triangle, b: Triangle, width: int, height: int, mode: ColorMode, config: Config) -> Triangle:
-    t = random.uniform(0.25, 0.75)
+def blend_triangles(
+    a: Triangle,
+    b: Triangle,
+    width: int,
+    height: int,
+    mode: ColorMode,
+    config: Config,
+    *,
+    rng: random.Random,
+) -> Triangle:
+    t = rng.uniform(0.25, 0.75)
     points = np.round(a.points * t + b.points * (1 - t)).astype(np.int32)
     for i in range(3):
         points[i, 0] = clamp_int(points[i, 0], 0, width - 1)
         points[i, 1] = clamp_int(points[i, 1], 0, height - 1)
 
     if mode == "grayscale":
-        assert isinstance(a.color, int) and isinstance(b.color, int)
+        if not (isinstance(a.color, int) and isinstance(b.color, int)):
+            raise TypeError("grayscale mode requires int colors")
         color = clamp_int(a.color * t + b.color * (1 - t), 0, 255)
     else:
-        assert isinstance(a.color, tuple) and isinstance(b.color, tuple)
+        if not (isinstance(a.color, tuple) and isinstance(b.color, tuple)):
+            raise TypeError("color mode requires (r, g, b) tuple colors")
         color = tuple(
             clamp_int(ac * t + bc * (1 - t), 0, 255)
             for ac, bc in zip(a.color, b.color)
@@ -460,8 +539,17 @@ def blend_triangles(a: Triangle, b: Triangle, width: int, height: int, mode: Col
     return Triangle(points=points, color=color, alpha=alpha)
 
 
-def blend_circles(a: Circle, b: Circle, width: int, height: int, mode: ColorMode, config: Config) -> Circle:
-    t = random.uniform(0.25, 0.75)
+def blend_circles(
+    a: Circle,
+    b: Circle,
+    width: int,
+    height: int,
+    mode: ColorMode,
+    config: Config,
+    *,
+    rng: random.Random,
+) -> Circle:
+    t = rng.uniform(0.25, 0.75)
     center = np.round(a.center * t + b.center * (1 - t)).astype(np.int32)
     center[0] = clamp_int(center[0], 0, width - 1)
     center[1] = clamp_int(center[1], 0, height - 1)
@@ -471,8 +559,17 @@ def blend_circles(a: Circle, b: Circle, width: int, height: int, mode: ColorMode
     return Circle(center=center, radius=radius, color=color, alpha=alpha)
 
 
-def blend_squares(a: Square, b: Square, width: int, height: int, mode: ColorMode, config: Config) -> Square:
-    t = random.uniform(0.25, 0.75)
+def blend_squares(
+    a: Square,
+    b: Square,
+    width: int,
+    height: int,
+    mode: ColorMode,
+    config: Config,
+    *,
+    rng: random.Random,
+) -> Square:
+    t = rng.uniform(0.25, 0.75)
     top_left = np.round(a.top_left * t + b.top_left * (1 - t)).astype(np.int32)
     top_left[0] = clamp_int(top_left[0], 0, width - 1)
     top_left[1] = clamp_int(top_left[1], 0, height - 1)
@@ -490,8 +587,10 @@ def blend_voronoi_sites(
     height: int,
     mode: ColorMode,
     config: Config,
+    *,
+    rng: random.Random,
 ) -> VoronoiSite:
-    t = random.uniform(0.25, 0.75)
+    t = rng.uniform(0.25, 0.75)
     point = np.round(a.point * t + b.point * (1 - t)).astype(np.int32)
     point[0] = clamp_int(point[0], 0, width - 1)
     point[1] = clamp_int(point[1], 0, height - 1)
@@ -506,22 +605,33 @@ def _blend_color(
     t: float,
 ) -> int | tuple[int, int, int]:
     if mode == "grayscale":
-        assert isinstance(a, int) and isinstance(b, int)
+        if not (isinstance(a, int) and isinstance(b, int)):
+            raise TypeError("grayscale mode requires int colors")
         return clamp_int(a * t + b * (1 - t), 0, 255)
-    assert isinstance(a, tuple) and isinstance(b, tuple)
+    if not (isinstance(a, tuple) and isinstance(b, tuple)):
+        raise TypeError("color mode requires (r, g, b) tuple colors")
     return tuple(clamp_int(ac * t + bc * (1 - t), 0, 255) for ac, bc in zip(a, b))
 
 
-def blend_shapes(a: Shape, b: Shape, width: int, height: int, mode: ColorMode, config: Config) -> Shape:
+def blend_shapes(
+    a: Shape,
+    b: Shape,
+    width: int,
+    height: int,
+    mode: ColorMode,
+    config: Config,
+    *,
+    rng: random.Random,
+) -> Shape:
     if isinstance(a, Triangle) and isinstance(b, Triangle):
-        return blend_triangles(a, b, width, height, mode, config)
+        return blend_triangles(a, b, width, height, mode, config, rng=rng)
     if isinstance(a, Circle) and isinstance(b, Circle):
-        return blend_circles(a, b, width, height, mode, config)
+        return blend_circles(a, b, width, height, mode, config, rng=rng)
     if isinstance(a, Square) and isinstance(b, Square):
-        return blend_squares(a, b, width, height, mode, config)
+        return blend_squares(a, b, width, height, mode, config, rng=rng)
     if isinstance(a, VoronoiSite) and isinstance(b, VoronoiSite):
-        return blend_voronoi_sites(a, b, width, height, mode, config)
-    return a.copy() if random.random() < 0.5 else b.copy()
+        return blend_voronoi_sites(a, b, width, height, mode, config, rng=rng)
+    return a.copy() if rng.random() < 0.5 else b.copy()
 
 
 @dataclass(slots=True)
@@ -612,7 +722,13 @@ class Individual:
             for shape in self.shapes:
                 shape.invalidate_caches()
 
-    def ensure_min_shapes(self, config: Config, guide: EvolutionGuide | None = None) -> bool:
+    def ensure_min_shapes(
+        self,
+        config: Config,
+        guide: EvolutionGuide | None = None,
+        *,
+        rng: random.Random,
+    ) -> bool:
         added = False
         while len(self.shapes) < config.min_shapes:
             shape = random_shape(
@@ -622,6 +738,7 @@ class Individual:
                 config.shape_mode,
                 config,
                 guide,
+                rng=rng,
             )
             self._mark_dirty(len(self.shapes), shape.bounding_box(self.width, self.height))
             self.shapes.append(shape)
@@ -630,7 +747,13 @@ class Individual:
             self.fitness = float("inf")
         return added
 
-    def add_random_shape(self, config: Config, guide: EvolutionGuide | None = None) -> bool:
+    def add_random_shape(
+        self,
+        config: Config,
+        guide: EvolutionGuide | None = None,
+        *,
+        rng: random.Random,
+    ) -> bool:
         if len(self.shapes) >= config.nb_elements_max:
             return False
         shape = random_shape(
@@ -640,26 +763,27 @@ class Individual:
             config.shape_mode,
             config,
             guide,
+            rng=rng,
         )
         self._mark_dirty(len(self.shapes), shape.bounding_box(self.width, self.height))
         self.shapes.append(shape)
         self.fitness = float("inf")
         return True
 
-    def remove_random_shape(self, config: Config) -> bool:
+    def remove_random_shape(self, config: Config, *, rng: random.Random) -> bool:
         if len(self.shapes) <= config.min_shapes:
             return False
-        idx = random.randint(0, len(self.shapes) - 1)
+        idx = rng.randint(0, len(self.shapes) - 1)
         self._mark_dirty(idx, self.shapes[idx].bounding_box(self.width, self.height))
         del self.shapes[idx]
         self.invalidate_cache_from(idx)
         self.fitness = float("inf")
         return True
 
-    def _mutate_random_shape(self, config: Config, rate: float) -> bool:
+    def _mutate_random_shape(self, config: Config, rate: float, *, rng: random.Random) -> bool:
         if not self.shapes:
             return False
-        idx = random.randint(0, len(self.shapes) - 1)
+        idx = rng.randint(0, len(self.shapes) - 1)
         old_bbox = self.shapes[idx].bounding_box(self.width, self.height)
         self._mark_dirty(idx, old_bbox)
         mutate_shape(
@@ -669,6 +793,7 @@ class Individual:
             self.mode,
             config,
             rate,
+            rng=rng,
         )
         self._mark_dirty(idx, self.shapes[idx].bounding_box(self.width, self.height))
         self.invalidate_cache_from(idx)
@@ -678,31 +803,33 @@ class Individual:
     def mutate(
         self,
         config: Config,
+        *,
         rate: float | None = None,
         guide: EvolutionGuide | None = None,
+        rng: random.Random,
     ) -> None:
         effective_rate = config.mutation_rate if rate is None else rate
-        self.ensure_min_shapes(config, guide)
+        self.ensure_min_shapes(config, guide, rng=rng)
         operations = max(1, int(round(config.mutation_operations * effective_rate)))
 
         for _ in range(operations):
-            roll = random.random()
+            roll = rng.random()
             if roll < config.prob_structural:
-                if random.random() < config.prob_add_vs_del:
-                    changed = self.add_random_shape(config, guide)
+                if rng.random() < config.prob_add_vs_del:
+                    changed = self.add_random_shape(config, guide, rng=rng)
                 else:
-                    changed = self.remove_random_shape(config)
+                    changed = self.remove_random_shape(config, rng=rng)
                 if not changed:
-                    self._mutate_random_shape(config, effective_rate)
+                    self._mutate_random_shape(config, effective_rate, rng=rng)
             elif roll < config.prob_structural + config.prob_reorder and len(self.shapes) >= 2:
-                i, j = random.sample(range(len(self.shapes)), 2)
+                i, j = rng.sample(range(len(self.shapes)), 2)
                 self._mark_dirty(i, self.shapes[i].bounding_box(self.width, self.height))
                 self._mark_dirty(j, self.shapes[j].bounding_box(self.width, self.height))
                 self.shapes[i], self.shapes[j] = self.shapes[j], self.shapes[i]
                 self.invalidate_cache_from(min(i, j))
                 self.fitness = float("inf")
             elif self.shapes:
-                self._mutate_random_shape(config, effective_rate)
+                self._mutate_random_shape(config, effective_rate, rng=rng)
 
     @classmethod
     def random(
@@ -713,10 +840,14 @@ class Individual:
         config: Config,
         count: int,
         guide: EvolutionGuide | None = None,
+        *,
+        rng: random.Random,
     ) -> Individual:
         ind = cls(width=width, height=height, mode=mode)
         for _ in range(count):
-            ind.shapes.append(random_shape(width, height, mode, config.shape_mode, config, guide))
+            ind.shapes.append(
+                random_shape(width, height, mode, config.shape_mode, config, guide, rng=rng)
+            )
         return ind
 
     @classmethod
@@ -726,8 +857,10 @@ class Individual:
         parent_b: Individual,
         config: Config,
         guide: EvolutionGuide | None = None,
+        *,
+        rng: random.Random,
     ) -> Individual:
-        child_count = random.randint(
+        child_count = rng.randint(
             min(len(parent_a.shapes), len(parent_b.shapes)),
             min(config.nb_elements_max, max(len(parent_a.shapes), len(parent_b.shapes))),
         )
@@ -735,7 +868,7 @@ class Individual:
         child = cls(width=parent_a.width, height=parent_a.height, mode=parent_a.mode)
         for i in range(child_count):
             if i < len(parent_a.shapes) and i < len(parent_b.shapes):
-                source = parent_a if random.random() < 0.5 else parent_b
+                source = parent_a if rng.random() < 0.5 else parent_b
                 child.shapes.append(source.shapes[i].copy())
             elif i < len(parent_a.shapes):
                 child.shapes.append(parent_a.shapes[i].copy())
@@ -750,9 +883,10 @@ class Individual:
                         config.shape_mode,
                         config,
                         guide,
+                        rng=rng,
                     )
                 )
-        child.ensure_min_shapes(config, guide)
+        child.ensure_min_shapes(config, guide, rng=rng)
         return child
 
     @classmethod
@@ -762,8 +896,10 @@ class Individual:
         parent_b: Individual,
         config: Config,
         guide: EvolutionGuide | None = None,
+        *,
+        rng: random.Random,
     ) -> Individual:
-        count = random.randint(
+        count = rng.randint(
             min(len(parent_a.shapes), len(parent_b.shapes)),
             min(config.nb_elements_max, max(len(parent_a.shapes), len(parent_b.shapes))),
         )
@@ -779,13 +915,14 @@ class Individual:
                         parent_a.height,
                         parent_a.mode,
                         config,
+                        rng=rng,
                     )
                 )
             elif i < len(parent_a.shapes):
                 child.shapes.append(parent_a.shapes[i].copy())
             else:
                 child.shapes.append(parent_b.shapes[i].copy())
-        child.ensure_min_shapes(config, guide)
+        child.ensure_min_shapes(config, guide, rng=rng)
         return child
 
 
@@ -838,7 +975,7 @@ def scale_individual(individual: Individual, width: int, height: int) -> Individ
                 ],
                 dtype=np.int32,
             )
-            shapes.append(VoronoiSite(point=point, color=shape.color, alpha=shape.alpha))
+            shapes.append(VoronoiSite(point=point, color=shape.color))
 
     return Individual(
         width=width,

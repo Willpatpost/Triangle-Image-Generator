@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.4.0 — 2026-10-14
+
+- Evolution randomness flows through a per-session RNG instead of the
+  module-global `random`; seeding one session no longer disturbs another,
+  and session files keep restoring the exact stream
+- `VoronoiSite.alpha` removed — it was serialized but never blended by any
+  renderer; older session files still load (the stored value is ignored)
+- Voronoi mutation tuning is config-driven (`voronoi_geometry_probability`,
+  `voronoi_color_sigma_scale`) instead of hardcoded magic numbers
+- Documented that "Mixed" genomes draw triangles/circles/squares; Voronoi is
+  a full-canvas partition and stays its own shape family
+- Renderer guards raise real exceptions instead of asserts (no longer
+  stripped by `python -O`), and cached final renders are read-only so
+  callers cannot corrupt the compositing cache through the returned array
+- Removed the unused `setup_logging`; `run_evolution` logs through a
+  private logger that honors `enable_logging`
+- GUI: the worker/UI protocol and button state machine moved into
+  `gui_state.py` and are unit-tested headlessly; session previews render
+  off the UI thread; closing the window offers to save the active session
+- Added `benchmarks/benchmark.py` for steps-per-second per renderer backend
+
 ## 2.3.0 — 2026-10-14
 
 First release under the `genetic-shape-image-generator` package name, aligned

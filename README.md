@@ -24,7 +24,7 @@ python app.py
 4. Continue the same run, or use **Refine** to carry its genome into a finer working resolution.
 5. Save only the best image, or save the complete session and resume it later with **Open Session**.
 
-`Full` working resolution uses every source pixel. Values such as `1/2` and `1/4` evolve a smaller raster for faster iteration. Refining scales the existing genome instead of restarting it.
+`Full` working resolution uses every source pixel. Values such as `1/2` and `1/4` evolve a smaller raster for faster iteration. Refining scales the existing genome instead of restarting it. Mixed genomes draw triangles, circles, and squares; Voronoi renders the whole canvas as one partition, so it stays its own shape family.
 
 Session files are versioned JSON. Current files preserve the best genome, active population, configuration, stagnation state, random-generator state, source path, and source hash. Older files using the original `triangles` and `min_triangles` keys remain loadable.
 
@@ -32,6 +32,7 @@ Session files are versioned JSON. Current files preserve the best genome, active
 
 ```text
 app.py                         Desktop GUI entry point
+gui_state.py                   Display-independent GUI state and worker protocol
 core/                          Evolution, rendering, fitness, shapes, state, and I/O
 images/                        Sample input images
 tests/                         Unit and integration tests
@@ -97,6 +98,12 @@ Run the test suite:
 
 ```bash
 python -m unittest discover -s tests -v
+```
+
+Measure evolution throughput per renderer backend:
+
+```bash
+python benchmarks/benchmark.py --backends numpy,numba --seconds 5
 ```
 
 Build distributable wheel and source archives:

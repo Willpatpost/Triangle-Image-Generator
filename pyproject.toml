@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "genetic-shape-image-generator"
-version = "2.3.0"
+version = "2.4.0"
 description = "Approximate images with an optimized genetic algorithm and primitive shapes."
 readme = "README.md"
 license = "MIT"
@@ -39,4 +39,4 @@ Repository = "https://github.com/Willpatpost/Triangle-Image-Generator"
 
 [tool.setuptools]
 packages = ["core"]
-py-modules = ["app"]
+py-modules = ["app", "gui_state"]

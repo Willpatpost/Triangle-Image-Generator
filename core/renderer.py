@@ -173,10 +173,12 @@ def composite_shape(
     region = canvas[min_y : max_y + 1, min_x : max_x + 1]
     alpha = _alpha_factor(config, shape)
     if mode == "grayscale":
-        assert isinstance(shape.color, int)
+        if not isinstance(shape.color, int):
+            raise TypeError(f"grayscale rendering requires int colors, got {type(shape.color).__name__}")
         _blend_grayscale(region, shape.color, alpha, mask)
     else:
-        assert isinstance(shape.color, tuple)
+        if not isinstance(shape.color, tuple):
+            raise TypeError(f"color rendering requires (r, g, b) tuples, got {type(shape.color).__name__}")
         _blend_color(region, shape.color, alpha, mask)
 
 
@@ -224,10 +226,12 @@ def composite_shape_region(
     ]
     alpha = _alpha_factor(config, shape)
     if mode == "grayscale":
-        assert isinstance(shape.color, int)
+        if not isinstance(shape.color, int):
+            raise TypeError(f"grayscale rendering requires int colors, got {type(shape.color).__name__}")
         _blend_grayscale(region, shape.color, alpha, mask)
     else:
-        assert isinstance(shape.color, tuple)
+        if not isinstance(shape.color, tuple):
+            raise TypeError(f"color rendering requires (r, g, b) tuples, got {type(shape.color).__name__}")
         _blend_color(region, shape.color, alpha, mask)
 
 
@@ -394,6 +398,8 @@ def _render_incremental(
 
     canvas = base_render.copy()
     canvas[min_y : max_y + 1, min_x : max_x + 1] = region
+    # The cached final render is handed to callers, so freeze it against mutation.
+    canvas.setflags(write=False)
     if len(cache) < len(individual.shapes):
         cache.extend([None] * (len(individual.shapes) - len(cache)))
     elif len(cache) > len(individual.shapes):
@@ -465,6 +471,7 @@ def _render_individual_full(
         if config.use_compositing_cache:
             cache = [None] * len(individual.shapes)
             if final_index >= 0:
+                canvas.setflags(write=False)
                 cache[final_index] = canvas
             individual._compositing_cache = cache
             individual._compositing_cache_signature = cache_signature
@@ -509,7 +516,11 @@ def _render_individual_full(
             composite_shape(canvas, individual.shapes[index], width, height, mode, config)
             should_cache = index == final_index or (index + 1) % stride == 0
             if config.use_compositing_cache and should_cache:
-                cache[index] = canvas if index == final_index else canvas.copy()
+                if index == final_index:
+                    canvas.setflags(write=False)
+                    cache[index] = canvas
+                else:
+                    cache[index] = canvas.copy()
     elif cached_index < final_index:
         try:
             canvas = render_shapes_accelerated(
@@ -522,6 +533,7 @@ def _render_individual_full(
                 backend,
             )
             if config.use_compositing_cache and final_index >= 0:
+                canvas.setflags(write=False)
                 cache[final_index] = canvas
         except Exception as exc:
             if config.renderer_backend != "auto":

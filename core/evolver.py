@@ -41,10 +41,7 @@ class EvolutionSession:
         config.validate()
         self.image_path = image_path
         self.downsample = downsample
-
-        if seed is not None and _resume_state is None:
-            random.seed(seed)
-            np.random.seed(seed)
+        self._rng = random.Random(seed)
 
         reference, background = load_reference_image(
             image_path,
@@ -111,6 +108,7 @@ class EvolutionSession:
             self.config.mode,
             self.config,
             guide=initial_guide,
+            rng=self._rng,
         )
         self.ranked = evaluate_population_parallel(
             self.population,
@@ -148,6 +146,7 @@ class EvolutionSession:
                 self.config,
                 seed=state.best,
                 guide=initial_guide,
+                rng=self._rng,
             )
 
         self.ranked = evaluate_population_parallel(
@@ -166,7 +165,7 @@ class EvolutionSession:
         self.mutation_rate = state.mutation_rate or self.config.mutation_rate
 
         if state.python_random_state is not None:
-            random.setstate(state.python_random_state)
+            self._rng.setstate(state.python_random_state)
         if state.numpy_random_state is not None:
             np.random.set_state(state.numpy_random_state)
 
@@ -218,6 +217,7 @@ class EvolutionSession:
             self.mutation_rate,
             crossover_generation=True,
             guide=guide,
+            rng=self._rng,
         )
 
         if (
@@ -227,7 +227,9 @@ class EvolutionSession:
         ):
             seed_elite = self.population[0].copy()
             for _ in range(self.config.hill_climb_attempts):
-                self.population.append(hill_climb_elite(seed_elite, self.config, guide=guide))
+                self.population.append(
+                    hill_climb_elite(seed_elite, self.config, guide=guide, rng=self._rng)
+                )
 
         self.ranked = evaluate_population_parallel(
             self.population,
@@ -288,6 +290,6 @@ class EvolutionSession:
             population=self.population,
             stagnation=self.stagnation,
             mutation_rate=self.mutation_rate,
-            python_random_state=random.getstate(),
+            python_random_state=self._rng.getstate(),
             numpy_random_state=np.random.get_state(),
         )

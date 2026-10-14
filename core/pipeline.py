@@ -11,17 +11,7 @@ from core.config import Config, RUNTIME_CONFIG_FIELDS
 from core.evolver import EvolutionSession
 from core.io import save_image
 
-
-def setup_logging(level: str, enabled: bool) -> None:
-    if not enabled:
-        logging.basicConfig(level=logging.CRITICAL)
-        return
-    numeric = getattr(logging, level.upper(), logging.INFO)
-    logging.basicConfig(
-        level=numeric,
-        format="[%(asctime)s] %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+_LOGGER = logging.getLogger("genetic_shape_image_generator")
 
 
 def run_evolution(
@@ -45,6 +35,7 @@ def run_evolution(
     if downsample < 1:
         raise ValueError("downsample must be at least 1")
     config.validate()
+    _LOGGER.setLevel(logging.INFO if config.enable_logging else logging.CRITICAL)
 
     if resume_path is not None:
         if not Path(resume_path).is_file():
@@ -55,7 +46,7 @@ def run_evolution(
             downsample=downsample,
             runtime_overrides={field: getattr(config, field) for field in RUNTIME_CONFIG_FIELDS},
         )
-        logging.info(
+        _LOGGER.info(
             "Resumed from iteration %d (fitness %.6f)",
             session.iteration,
             session.global_best.fitness,
@@ -64,20 +55,20 @@ def run_evolution(
         session = EvolutionSession(image_path, config, downsample=downsample, seed=seed)
 
     height, width = session.reference.shape[:2]
-    logging.info("Reference image: %dx%d (%s)", width, height, session.config.mode)
-    logging.info("Background color: %s", session.background)
+    _LOGGER.info("Reference image: %dx%d (%s)", width, height, session.config.mode)
+    _LOGGER.info("Background color: %s", session.background)
 
     last_log_time = time.time()
     while session.iteration < iterations:
         snapshot = session.step()
         if snapshot.improved:
-            logging.info(
+            _LOGGER.info(
                 "New best fitness %.6f at iteration %d",
                 snapshot.best_fitness,
                 session.iteration,
             )
         if time.time() - last_log_time >= session.config.log_interval_sec:
-            logging.info(
+            _LOGGER.info(
                 "Iteration %d | shapes %d | current %.6f | best %.6f | mutation %.2f",
                 session.iteration,
                 snapshot.shape_count,
@@ -87,16 +78,16 @@ def run_evolution(
             )
             last_log_time = time.time()
         if session.global_best.fitness <= session.config.fitness_goal:
-            logging.info("Fitness goal reached at iteration %d", session.iteration)
+            _LOGGER.info("Fitness goal reached at iteration %d", session.iteration)
             break
         if session.stagnation >= session.config.stagnation_threshold:
-            logging.info("Stopping after %d iterations without improvement", session.stagnation)
+            _LOGGER.info("Stopping after %d iterations without improvement", session.stagnation)
             break
 
     final = session.render_best()
     if save_path is not None:
         save_image(final, save_path, session.config.mode)
-    logging.info("Evolution complete. Best fitness: %.6f", session.global_best.fitness)
+    _LOGGER.info("Evolution complete. Best fitness: %.6f", session.global_best.fitness)
     return final, session.global_best.fitness
 
 

@@ -29,24 +29,24 @@ class EvolutionGuide:
         baseline = np.broadcast_to(value, reference.shape)
         return cls(reference=reference, baseline=baseline)
 
-    def sample_high_error_point(self, candidates: int) -> tuple[int, int]:
+    def sample_high_error_point(self, candidates: int, *, rng: random.Random) -> tuple[int, int]:
         height, width = self.reference.shape[:2]
-        best_x = random.randrange(width)
-        best_y = random.randrange(height)
+        best_x = rng.randrange(width)
+        best_y = rng.randrange(height)
         best_error = -1.0
 
         if self.reference.ndim == 2:
             for _ in range(candidates):
-                x = random.randrange(width)
-                y = random.randrange(height)
+                x = rng.randrange(width)
+                y = rng.randrange(height)
                 delta = float(self.reference[y, x]) - float(self.baseline[y, x])
                 error = delta * delta
                 if error > best_error:
                     best_x, best_y, best_error = x, y, error
         else:
             for _ in range(candidates):
-                x = random.randrange(width)
-                y = random.randrange(height)
+                x = rng.randrange(width)
+                y = rng.randrange(height)
                 target = self.reference[y, x]
                 current = self.baseline[y, x]
                 d0 = float(target[0]) - float(current[0])

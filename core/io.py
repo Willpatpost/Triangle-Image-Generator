@@ -76,16 +76,18 @@ def _shape_to_dict(shape: Shape) -> dict[str, Any]:
     data: dict[str, Any] = {
         "kind": shape_kind(shape),
         "color": shape.color if isinstance(shape.color, int) else list(shape.color),
-        "alpha": shape.alpha,
     }
     if isinstance(shape, Triangle):
+        data["alpha"] = shape.alpha
         data["points"] = shape.points.tolist()
     elif isinstance(shape, Circle):
+        data["alpha"] = shape.alpha
         data["center"] = shape.center.tolist()
         data["radius"] = shape.radius
     elif isinstance(shape, VoronoiSite):
         data["point"] = shape.point.tolist()
     else:
+        data["alpha"] = shape.alpha
         data["top_left"] = shape.top_left.tolist()
         data["side"] = shape.side
     return data
@@ -112,11 +114,7 @@ def _shape_from_dict(data: dict[str, Any]) -> Shape:
             alpha=int(data["alpha"]),
         )
     if kind == "voronoi":
-        return VoronoiSite(
-            point=np.array(data["point"], dtype=np.int32),
-            color=color,
-            alpha=int(data.get("alpha", 255)),
-        )
+        return VoronoiSite(point=np.array(data["point"], dtype=np.int32), color=color)
     return Triangle(points=np.array(data["points"], dtype=np.int32), color=color, alpha=int(data["alpha"]))
 
 

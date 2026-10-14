@@ -14,6 +14,8 @@ def create_initial_population(
     config: Config,
     seed: Individual | None = None,
     guide: EvolutionGuide | None = None,
+    *,
+    rng: random.Random,
 ) -> list[Individual]:
     population: list[Individual] = []
     if seed is not None:
@@ -22,7 +24,15 @@ def create_initial_population(
         population.append(seeded)
     while len(population) < config.pop_size:
         population.append(
-            Individual.random(width, height, mode, config, config.nb_elements_initial, guide)
+            Individual.random(
+                width,
+                height,
+                mode,
+                config,
+                config.nb_elements_initial,
+                guide,
+                rng=rng,
+            )
         )
     return population
 
@@ -32,9 +42,11 @@ def hill_climb_elite(
     config: Config,
     rate: float = 0.5,
     guide: EvolutionGuide | None = None,
+    *,
+    rng: random.Random,
 ) -> Individual:
     candidate = elite.fork()
-    candidate.mutate(config, rate=config.mutation_rate * rate, guide=guide)
+    candidate.mutate(config, rate=config.mutation_rate * rate, guide=guide, rng=rng)
     candidate.fitness = float("inf")
     return candidate
 
@@ -43,9 +55,11 @@ def _select_elite(
     population: list[Individual],
     ranked: list[tuple[int, float]],
     elite_count: int,
+    *,
+    rng: random.Random,
 ) -> Individual:
     # Squaring biases selection toward the best ranks while preserving diversity.
-    rank = min(elite_count - 1, int(random.random() ** 2 * elite_count))
+    rank = min(elite_count - 1, int(rng.random() ** 2 * elite_count))
     return population[ranked[rank][0]]
 
 
@@ -56,6 +70,8 @@ def next_generation(
     mutation_rate: float,
     crossover_generation: bool,
     guide: EvolutionGuide | None = None,
+    *,
+    rng: random.Random,
 ) -> list[Individual]:
     elite_count = min(config.nb_elite, len(ranked))
     elite_sources = [population[ranked[index][0]] for index in range(elite_count)]
@@ -63,24 +79,24 @@ def next_generation(
 
     crossover_weight = config.prob_uniform_crossover + config.prob_blend_crossover
     while len(offspring) < config.pop_size:
-        parent_a = _select_elite(population, ranked, elite_count)
+        parent_a = _select_elite(population, ranked, elite_count, rng=rng)
         use_crossover = (
             crossover_generation
             and elite_count > 1
             and crossover_weight > 0
-            and random.random() < config.crossover_rate
+            and rng.random() < config.crossover_rate
         )
         if use_crossover:
-            parent_b = _select_elite(population, ranked, elite_count)
+            parent_b = _select_elite(population, ranked, elite_count, rng=rng)
             uniform_probability = config.prob_uniform_crossover / crossover_weight
-            if random.random() < uniform_probability:
-                child = Individual.crossover_uniform(parent_a, parent_b, config, guide)
+            if rng.random() < uniform_probability:
+                child = Individual.crossover_uniform(parent_a, parent_b, config, guide, rng=rng)
             else:
-                child = Individual.crossover_blend(parent_a, parent_b, config, guide)
-            child.mutate(config, rate=mutation_rate * 0.75, guide=guide)
+                child = Individual.crossover_blend(parent_a, parent_b, config, guide, rng=rng)
+            child.mutate(config, rate=mutation_rate * 0.75, guide=guide, rng=rng)
         else:
             child = parent_a.fork()
-            child.mutate(config, rate=mutation_rate, guide=guide)
+            child.mutate(config, rate=mutation_rate, guide=guide, rng=rng)
         offspring.append(child)
 
     return offspring[: config.pop_size]

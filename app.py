@@ -3,11 +3,8 @@
 
 from __future__ import annotations
 
-import queue
 import threading
-import time
 import tkinter as tk
-from dataclasses import dataclass, replace
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -16,9 +13,19 @@ from PIL import Image, ImageTk
 
 from core.acceleration import available_renderer_backends
 from core.config import Config
-from core.evolver import EvolutionSession, EvolutionSnapshot
-from core.io import file_sha256, read_state, save_image
-from core.renderer import render_individual
+from core.io import save_image
+from gui_state import (
+    EvolutionController,
+    SessionNeedsSource,
+    SessionPreview,
+    SessionPreviewFailed,
+    SessionSettings,
+    WorkerError,
+    WorkerFinished,
+    WorkerSessionReady,
+    WorkerUpdate,
+    compute_control_states,
+)
 
 
 CANVAS_WIDTH = 560
@@ -42,65 +49,17 @@ BACKENDS = {
 NEXT_SCALE = {6: 4, 5: 3, 4: 2, 3: 2, 2: 1}
 
 
-@dataclass(frozen=True)
-class SessionSettings:
-    image_path: Path
-    mode: str
-    shape_mode: str
-    downsample: int
-    population: int
-    initial_shapes: int
-    max_shapes: int
-    renderer_backend: str
-    max_workers: int
-
-
-@dataclass
-class WorkerUpdate:
-    run_id: int
-    snapshot: EvolutionSnapshot
-    rendered: np.ndarray
-
-
-@dataclass
-class WorkerSessionReady:
-    run_id: int
-    session: EvolutionSession
-    settings: SessionSettings
-
-
-@dataclass
-class WorkerFinished:
-    run_id: int
-    failed: bool
-
-
-@dataclass
-class WorkerError:
-    run_id: int
-    error: Exception
-
-
-WorkerMessage = WorkerUpdate | WorkerSessionReady | WorkerFinished | WorkerError
-
-
 class GeneticImageApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Genetic Shape Image Generator")
         self.minsize(1180, 720)
 
+        self.controller = EvolutionController()
         self.image_path: Path | None = None
-        self.resume_path: Path | None = None
-        self.session_settings: SessionSettings | None = None
         self.target_photo: ImageTk.PhotoImage | None = None
         self.evolution_photo: ImageTk.PhotoImage | None = None
         self.best_image: np.ndarray | None = None
-        self.session: EvolutionSession | None = None
-        self.worker: threading.Thread | None = None
-        self.stop_event = threading.Event()
-        self.updates: queue.Queue[WorkerMessage] = queue.Queue()
-        self.run_id = 0
         self._updating_settings = False
 
         self.shape_var = tk.StringVar(value="Triangles")
@@ -264,20 +223,39 @@ class GeneticImageApp(tk.Tk):
             variable.trace_add("write", self._settings_changed)
 
     def _settings_changed(self, *_args: object) -> None:
-        if self._updating_settings or self._is_running():
+        if self._updating_settings or self.controller.is_running():
             return
-        if self.session is None and self.resume_path is None:
+        if not self.controller.has_resumable_state():
             return
-        self.session = None
-        self.session_settings = None
-        self.resume_path = None
+        self.controller.reset_for_settings_change()
         self.best_image = None
         self.evolution_label.configure(image="", text="")
-        self.save_button.configure(state=tk.DISABLED)
-        self.save_session_button.configure(state=tk.DISABLED)
-        self.refine_button.configure(state=tk.DISABLED)
-        self.start_button.configure(text="Start", state=tk.NORMAL if self.image_path else tk.DISABLED)
+        self._apply_control_states()
         self.status_var.set("Settings changed. Ready to start a new evolution.")
+
+    def _apply_control_states(self) -> None:
+        states = compute_control_states(
+            running=self.controller.is_running(),
+            image_chosen=self.image_path is not None,
+            has_session=self.controller.session is not None,
+            has_resume=self.controller.resume_path is not None,
+            has_best=self.best_image is not None,
+            session_downsample=(
+                self.controller.session.downsample if self.controller.session is not None else None
+            ),
+        )
+
+        self.choose_button.configure(state=tk.NORMAL if states.choose_image else tk.DISABLED)
+        self.open_session_button.configure(state=tk.NORMAL if states.open_session else tk.DISABLED)
+        for widget, enabled_state in self._setting_widgets:
+            widget.configure(state=enabled_state if states.settings else tk.DISABLED)
+        if states.start_text is not None:
+            self.start_button.configure(text=states.start_text)
+        self.start_button.configure(state=tk.NORMAL if states.start_enabled else tk.DISABLED)
+        self.stop_button.configure(state=tk.NORMAL if states.stop else tk.DISABLED)
+        self.refine_button.configure(state=tk.NORMAL if states.refine else tk.DISABLED)
+        self.save_button.configure(state=tk.NORMAL if states.save_best else tk.DISABLED)
+        self.save_session_button.configure(state=tk.NORMAL if states.save_session else tk.DISABLED)
 
     def _choose_image(self) -> None:
         path = filedialog.askopenfilename(
@@ -291,19 +269,16 @@ class GeneticImageApp(tk.Tk):
             return
 
         self.image_path = Path(path).resolve()
-        self.resume_path = None
-        self.session = None
-        self.session_settings = None
+        self.controller.reset_for_settings_change()
         self.best_image = None
-        self.save_button.configure(state=tk.DISABLED)
-        self.save_session_button.configure(state=tk.DISABLED)
-        self.refine_button.configure(state=tk.DISABLED)
-        self.start_button.configure(text="Start", state=tk.NORMAL)
         self._show_target(self.image_path)
         self.evolution_label.configure(image="", text="")
+        self._apply_control_states()
         self.status_var.set(f"Ready: {self.image_path.name}")
 
     def _open_session(self) -> None:
+        if self.controller.is_running():
+            return
         path = filedialog.askopenfilename(
             title="Open evolution session",
             filetypes=(("Evolution session", "*.json"), ("All files", "*.*")),
@@ -311,64 +286,52 @@ class GeneticImageApp(tk.Tk):
         if not path:
             return
 
+        run_id = self.controller.begin_run()
+        self.status_var.set("Loading session...")
+        threading.Thread(
+            target=self.controller.load_session_preview,
+            args=(run_id, Path(path).resolve()),
+            daemon=True,
+            name="session-loader",
+        ).start()
+
+    def _session_backend_label(self, config: Config) -> str:
+        label = next(
+            (label for label, value in BACKENDS.items() if value == config.renderer_backend),
+            "Automatic",
+        )
+        if label not in self.backend_box.cget("values"):
+            label = "Automatic"
+        return label
+
+    def _apply_session_preview(self, message: SessionPreview) -> None:
+        state = message.state
+        shape_label = next(label for label, value in SHAPES.items() if value == state.config.shape_mode)
+        mode_label = next(label for label, value in MODES.items() if value == state.config.mode)
+        scale_label = next((label for label, value in SCALES.items() if value == state.downsample), "Full")
+        backend_label = self._session_backend_label(state.config)
+
+        self._updating_settings = True
         try:
-            state = read_state(path)
-            source = Path(state.source_image).expanduser() if state.source_image else None
-            if source is None or not source.is_file():
-                selected = filedialog.askopenfilename(
-                    title="Choose the original source image",
-                    filetypes=(("Images", "*.png *.jpg *.jpeg *.bmp *.gif *.webp"), ("All files", "*.*")),
-                )
-                if not selected:
-                    return
-                source = Path(selected)
-            source = source.resolve()
-            if state.source_sha256 and file_sha256(source) != state.source_sha256:
-                raise ValueError("That image does not match the source saved with this session.")
+            self.shape_var.set(shape_label)
+            self.mode_var.set(mode_label)
+            self.scale_var.set(scale_label)
+            self.population_var.set(state.config.pop_size)
+            self.initial_shapes_var.set(state.config.nb_elements_initial)
+            self.max_shapes_var.set(state.config.nb_elements_max)
+            self.backend_var.set(backend_label)
+            self.workers_var.set(state.config.max_workers)
+        finally:
+            self._updating_settings = False
 
-            shape_label = next(label for label, value in SHAPES.items() if value == state.config.shape_mode)
-            mode_label = next(label for label, value in MODES.items() if value == state.config.mode)
-            scale_label = next((label for label, value in SCALES.items() if value == state.downsample), "Full")
-            backend_label = next(
-                (label for label, value in BACKENDS.items() if value == state.config.renderer_backend),
-                "Automatic",
-            )
-            if backend_label not in self.backend_box.cget("values"):
-                backend_label = "Automatic"
-
-            self._updating_settings = True
-            try:
-                self.shape_var.set(shape_label)
-                self.mode_var.set(mode_label)
-                self.scale_var.set(scale_label)
-                self.population_var.set(state.config.pop_size)
-                self.initial_shapes_var.set(state.config.nb_elements_initial)
-                self.max_shapes_var.set(state.config.nb_elements_max)
-                self.backend_var.set(backend_label)
-                self.workers_var.set(state.config.max_workers)
-            finally:
-                self._updating_settings = False
-
-            self.image_path = source
-            self.resume_path = Path(path).resolve()
-            self.session = None
-            self.session_settings = None
-            preview_config = replace(
-                state.config,
-                renderer_backend=BACKENDS[backend_label],  # type: ignore[arg-type]
-            )
-            self.best_image = render_individual(state.best, preview_config, state.background)
-            self._show_target(source)
-            self._show_evolution(self.best_image)
-            self.start_button.configure(text="Resume", state=tk.NORMAL)
-            self.save_button.configure(state=tk.NORMAL)
-            self.save_session_button.configure(state=tk.DISABLED)
-            self.refine_button.configure(state=tk.DISABLED)
-            self.status_var.set(
-                f"Session loaded at iteration {state.iteration:,} | Best {state.best_fitness:.6f}"
-            )
-        except Exception as exc:
-            messagebox.showerror("Could not open session", str(exc))
+        self.image_path = message.source
+        self.best_image = message.rendered
+        self._show_target(message.source)
+        self._show_evolution(message.rendered)
+        self._apply_control_states()
+        self.status_var.set(
+            f"Session loaded at iteration {state.iteration:,} | Best {state.best_fitness:.6f}"
+        )
 
     def _current_settings(self) -> SessionSettings:
         if self.image_path is None:
@@ -412,7 +375,7 @@ class GeneticImageApp(tk.Tk):
         return config
 
     def _start_evolving(self, *, refine_to: int | None = None) -> None:
-        if self._is_running():
+        if self.controller.is_running():
             return
         try:
             settings = self._current_settings()
@@ -421,184 +384,86 @@ class GeneticImageApp(tk.Tk):
             messagebox.showerror("Invalid settings", str(exc))
             return
 
-        self.run_id += 1
-        run_id = self.run_id
-        existing_session = self.session if self.session_settings == settings else None
-        resume_path = self.resume_path if existing_session is None else None
-        self.stop_event.clear()
-        self._set_running(True)
+        self.controller.start_worker(settings, config, refine_to)
+        self._apply_control_states()
         self.status_var.set("Preparing evolution...")
-
-        self.worker = threading.Thread(
-            target=self._run_worker,
-            args=(run_id, settings, config, existing_session, resume_path, refine_to),
-            daemon=True,
-        )
-        self.worker.start()
-
-    def _run_worker(
-        self,
-        run_id: int,
-        settings: SessionSettings,
-        config: Config,
-        existing_session: EvolutionSession | None,
-        resume_path: Path | None,
-        refine_to: int | None,
-    ) -> None:
-        failed = False
-        try:
-            if existing_session is not None:
-                session = existing_session
-            elif resume_path is not None:
-                session = EvolutionSession.from_state(
-                    str(resume_path),
-                    image_path=str(settings.image_path),
-                    runtime_overrides={
-                        "renderer_backend": settings.renderer_backend,
-                        "max_workers": settings.max_workers,
-                        "enable_logging": False,
-                    },
-                )
-            else:
-                session = EvolutionSession(
-                    str(settings.image_path),
-                    config,
-                    downsample=settings.downsample,
-                )
-
-            if refine_to is not None and refine_to < session.downsample:
-                session.refine_resolution(refine_to)
-                settings = SessionSettings(
-                    image_path=settings.image_path,
-                    mode=settings.mode,
-                    shape_mode=settings.shape_mode,
-                    downsample=refine_to,
-                    population=settings.population,
-                    initial_shapes=settings.initial_shapes,
-                    max_shapes=settings.max_shapes,
-                    renderer_backend=settings.renderer_backend,
-                    max_workers=settings.max_workers,
-                )
-
-            self.updates.put(WorkerSessionReady(run_id=run_id, session=session, settings=settings))
-            last_render = 0.0
-            latest_snapshot: EvolutionSnapshot | None = None
-            while not self.stop_event.is_set():
-                snapshot = session.step_many(4)
-                latest_snapshot = snapshot
-                now = time.monotonic()
-                if snapshot.improved or now - last_render >= 0.25:
-                    self.updates.put(
-                        WorkerUpdate(run_id=run_id, snapshot=snapshot, rendered=session.render_best())
-                    )
-                    last_render = now
-
-            if latest_snapshot is None:
-                latest_snapshot = EvolutionSnapshot(
-                    iteration=session.iteration,
-                    best_fitness=session.global_best.fitness,
-                    current_fitness=session.ranked[0][1],
-                    shape_count=len(session.global_best.shapes),
-                    improved=False,
-                )
-            self.updates.put(
-                WorkerUpdate(
-                    run_id=run_id,
-                    snapshot=latest_snapshot,
-                    rendered=session.render_best(),
-                )
-            )
-        except Exception as exc:
-            failed = True
-            self.updates.put(WorkerError(run_id=run_id, error=exc))
-        finally:
-            self.updates.put(WorkerFinished(run_id=run_id, failed=failed))
 
     def _poll_updates(self) -> None:
         try:
-            while True:
-                update = self.updates.get_nowait()
-                if update.run_id != self.run_id:
-                    continue
-                if isinstance(update, WorkerSessionReady):
-                    self.session = update.session
-                    self.session_settings = update.settings
-                    self.resume_path = None
+            for message in self.controller.drain():
+                if isinstance(message, WorkerSessionReady):
                     self._updating_settings = True
                     try:
                         scale_label = next(
-                            label for label, value in SCALES.items() if value == update.session.downsample
+                            label for label, value in SCALES.items() if value == message.session.downsample
                         )
                         self.scale_var.set(scale_label)
                     finally:
                         self._updating_settings = False
                     continue
-                if isinstance(update, WorkerError):
-                    self.stop_event.set()
-                    messagebox.showerror("Evolution failed", str(update.error))
+                if isinstance(message, WorkerError):
+                    self.controller.request_stop()
+                    messagebox.showerror("Evolution failed", str(message.error))
                     self.status_var.set("Evolution stopped after an error.")
                     continue
-                if isinstance(update, WorkerFinished):
-                    self.worker = None
-                    self._set_running(False)
-                    if not update.failed and self.session is not None:
+                if isinstance(message, WorkerFinished):
+                    self._apply_control_states()
+                    if not message.failed and self.controller.session is not None:
                         self.status_var.set(
-                            f"Paused at iteration {self.session.iteration:,} | "
-                            f"Best {self.session.global_best.fitness:.6f}"
+                            f"Paused at iteration {self.controller.session.iteration:,} | "
+                            f"Best {self.controller.session.global_best.fitness:.6f}"
                         )
                     continue
-
-                self.best_image = update.rendered
-                self._show_evolution(update.rendered)
-                self.save_button.configure(state=tk.NORMAL)
-                self.status_var.set(
-                    "Iteration {0.iteration:,} | Best {0.best_fitness:.6f} | "
-                    "Current {0.current_fitness:.6f} | Shapes {0.shape_count}".format(update.snapshot)
-                )
-        except queue.Empty:
-            pass
+                if isinstance(message, SessionPreview):
+                    self._apply_session_preview(message)
+                    continue
+                if isinstance(message, SessionPreviewFailed):
+                    messagebox.showerror("Could not open session", str(message.error))
+                    self.status_var.set("Session open failed.")
+                    continue
+                if isinstance(message, SessionNeedsSource):
+                    selected = filedialog.askopenfilename(
+                        title="Choose the original source image",
+                        filetypes=(
+                            ("Images", "*.png *.jpg *.jpeg *.bmp *.gif *.webp"),
+                            ("All files", "*.*"),
+                        ),
+                    )
+                    if selected:
+                        run_id = self.controller.begin_run()
+                        threading.Thread(
+                            target=self.controller.load_session_preview,
+                            args=(run_id, message.session_path, Path(selected).resolve()),
+                            daemon=True,
+                            name="session-loader",
+                        ).start()
+                    else:
+                        self.status_var.set("Session open cancelled.")
+                    continue
+                if isinstance(message, WorkerUpdate):
+                    self.best_image = message.rendered
+                    self._show_evolution(message.rendered)
+                    self.save_button.configure(state=tk.NORMAL)
+                    self.status_var.set(
+                        "Iteration {0.iteration:,} | Best {0.best_fitness:.6f} | "
+                        "Current {0.current_fitness:.6f} | Shapes {0.shape_count}".format(message.snapshot)
+                    )
+                    continue
         finally:
             self.after(80, self._poll_updates)
 
-    def _set_running(self, running: bool) -> None:
-        state = tk.DISABLED if running else tk.NORMAL
-        self.choose_button.configure(state=state)
-        self.open_session_button.configure(state=state)
-        for widget, enabled_state in self._setting_widgets:
-            widget.configure(state=tk.DISABLED if running else enabled_state)
-
-        if running:
-            self.start_button.configure(state=tk.DISABLED)
-            self.stop_button.configure(state=tk.NORMAL)
-            self.refine_button.configure(state=tk.DISABLED)
-            self.save_button.configure(state=tk.DISABLED)
-            self.save_session_button.configure(state=tk.DISABLED)
-            return
-
-        self.stop_button.configure(state=tk.DISABLED)
-        self.start_button.configure(
-            text="Continue" if self.session is not None else ("Resume" if self.resume_path else "Start"),
-            state=tk.NORMAL if self.image_path else tk.DISABLED,
-        )
-        self.save_button.configure(state=tk.NORMAL if self.best_image is not None else tk.DISABLED)
-        self.save_session_button.configure(state=tk.NORMAL if self.session is not None else tk.DISABLED)
-        can_refine = self.session is not None and self.session.downsample > 1
-        self.refine_button.configure(state=tk.NORMAL if can_refine else tk.DISABLED)
-
-    def _is_running(self) -> bool:
-        return self.worker is not None and self.worker.is_alive()
-
     def _stop_evolving(self) -> None:
-        if not self._is_running():
+        if not self.controller.is_running():
             return
-        self.stop_event.set()
+        self.controller.request_stop()
         self.stop_button.configure(state=tk.DISABLED)
         self.status_var.set("Stopping evolution...")
 
     def _refine(self) -> None:
-        if self.session is None or self._is_running() or self.session.downsample <= 1:
+        session = self.controller.session
+        if session is None or self.controller.is_running() or session.downsample <= 1:
             return
-        next_scale = NEXT_SCALE.get(self.session.downsample, self.session.downsample - 1)
+        next_scale = NEXT_SCALE.get(session.downsample, session.downsample - 1)
         self._start_evolving(refine_to=next_scale)
 
     def _save_best(self) -> None:
@@ -619,7 +484,8 @@ class GeneticImageApp(tk.Tk):
             messagebox.showerror("Could not save image", str(exc))
 
     def _save_session(self) -> None:
-        if self.session is None or self._is_running():
+        session = self.controller.session
+        if session is None or self.controller.is_running():
             return
         path = filedialog.asksaveasfilename(
             title="Save evolution session",
@@ -629,7 +495,7 @@ class GeneticImageApp(tk.Tk):
         if not path:
             return
         try:
-            self.session.save(path)
+            session.save(path)
             self.status_var.set(f"Saved session {Path(path).name}")
         except Exception as exc:
             messagebox.showerror("Could not save session", str(exc))
@@ -655,7 +521,36 @@ class GeneticImageApp(tk.Tk):
         return ImageTk.PhotoImage(image)
 
     def _on_close(self) -> None:
-        self.stop_event.set()
+        session = self.controller.session
+        if session is not None:
+            answer = messagebox.askyesnocancel(
+                "Save session?",
+                "Save this evolution session before closing?",
+            )
+            if answer is None:
+                return
+            if answer:
+                self.controller.request_stop()
+                self.controller.join_worker(timeout=10.0)
+                if self.controller.is_running():
+                    messagebox.showwarning(
+                        "Still running",
+                        "The evolution thread did not stop in time; closing without saving.",
+                    )
+                else:
+                    path = filedialog.asksaveasfilename(
+                        title="Save evolution session",
+                        defaultextension=".json",
+                        filetypes=(("Evolution session", "*.json"), ("All files", "*.*")),
+                    )
+                    if not path:
+                        return
+                    try:
+                        session.save(path)
+                    except Exception as exc:
+                        messagebox.showerror("Could not save session", str(exc))
+                        return
+        self.controller.request_stop()
         self.destroy()
 
 

@@ -48,6 +48,8 @@ class Config:
     mutation_sigma_color: float = 12.0
     mutation_sigma_alpha: float = 10.0
     mutate_all_color_channels: bool = False
+    voronoi_geometry_probability: float = 0.2
+    voronoi_color_sigma_scale: float = 1.5
 
     # Crossover
     crossover_rate: float = 0.0
@@ -125,6 +127,7 @@ class Config:
             "prob_mutate_geometry": self.prob_mutate_geometry,
             "crossover_rate": self.crossover_rate,
             "target_guided_probability": self.target_guided_probability,
+            "voronoi_geometry_probability": self.voronoi_geometry_probability,
         }
         for name, value in probabilities.items():
             if not 0.0 <= value <= 1.0:
@@ -139,6 +142,8 @@ class Config:
             raise ValueError("target_guidance_candidates must be at least 1")
         if min(self.mutation_sigma_points, self.mutation_sigma_color, self.mutation_sigma_alpha) < 0:
             raise ValueError("mutation sigmas must be non-negative")
+        if self.voronoi_color_sigma_scale < 0:
+            raise ValueError("voronoi_color_sigma_scale must be non-negative")
         if not 0 <= self.alpha_min <= 255:
             raise ValueError("alpha_min must be between 0 and 255")
         if not 0 <= self.alpha_max <= 255:

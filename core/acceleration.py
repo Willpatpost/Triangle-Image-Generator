@@ -181,11 +181,15 @@ def encode_shapes(individual: Individual, config: Config) -> EncodedShapes:
             colors[index, 0] = shape.color
         else:
             colors[index] = shape.color
-        alphas[index] = (
-            config.fixed_alpha
-            if 0.0 <= config.fixed_alpha <= 1.0
-            else shape.alpha / 255.0
-        )
+        if isinstance(shape, VoronoiSite):
+            # Voronoi cells fill fully; the encoded alpha is never consumed.
+            alphas[index] = 1.0
+        else:
+            alphas[index] = (
+                config.fixed_alpha
+                if 0.0 <= config.fixed_alpha <= 1.0
+                else shape.alpha / 255.0
+            )
 
     return EncodedShapes(kinds, geometry, bounds, colors, alphas)
 

@@ -5,4 +5,5 @@ include requirements.txt
 include requirements-acceleration.txt
 recursive-include images *.bmp *.gif *.jpeg *.jpg *.png *.webp
 recursive-include tests *.py
+recursive-include benchmarks *.py
 global-exclude __pycache__ *.py[cod] *.nbc *.nbi
