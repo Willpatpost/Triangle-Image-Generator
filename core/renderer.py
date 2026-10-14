@@ -17,10 +17,11 @@ from core.shapes import BBox, Circle, Individual, Shape, Square, Triangle, Voron
 
 @dataclass(slots=True)
 class RenderResult:
-    image: np.ndarray
+    image: np.ndarray | None = None
     dirty_bbox: BBox | None = None
     previous_image: np.ndarray | None = None
     previous_error_sum: float | None = None
+    dirty_region: np.ndarray | None = None
     incremental: bool = False
 
 
@@ -306,6 +307,7 @@ def _render_incremental(
         not config.use_dirty_regions
         or not config.use_compositing_cache
         or individual._base_render is None
+        or individual._base_error_sum is None  # incremental scoring needs the previous sum
         or individual._dirty_from is None
         or individual._dirty_bbox is None
         or individual._compositing_cache_signature
@@ -396,25 +398,18 @@ def _render_incremental(
                     dirty_bbox,
                 )
 
-    canvas = base_render.copy()
-    canvas[min_y : max_y + 1, min_x : max_x + 1] = region
-    # The cached final render is handed to callers, so freeze it against mutation.
-    canvas.setflags(write=False)
-    if len(cache) < len(individual.shapes):
-        cache.extend([None] * (len(individual.shapes) - len(cache)))
-    elif len(cache) > len(individual.shapes):
-        del cache[len(individual.shapes) :]
-    if cache:
-        cache[-1] = canvas
-
+    # Score-only fast path: defer the full-canvas copy. The region and the
+    # pre-mutation render are enough to score the mutation; the final canvas
+    # is materialized lazily (and shared across forks) when next needed.
     previous_error_sum = individual._base_error_sum
-    individual._compositing_cache = cache
+    individual._pending_region = (dirty_bbox, region, base_render, [])
     individual._clear_dirty_tracking()
     return RenderResult(
-        image=canvas,
+        image=None,
         dirty_bbox=dirty_bbox,
         previous_image=base_render,
         previous_error_sum=previous_error_sum,
+        dirty_region=region,
         incremental=True,
     )
 
@@ -434,7 +429,13 @@ def _render_individual_full(
         and individual._compositing_cache_signature != cache_signature
     ):
         individual._compositing_cache = []
+        individual._pending_region = None
     cache = individual._compositing_cache if config.use_compositing_cache else []
+
+    if config.use_compositing_cache:
+        # Materialize any pending incremental region so the checkpoint scan
+        # below can early-return the current final render.
+        individual._cached_final_render()
 
     is_voronoi = config.shape_mode == "voronoi" or any(
         isinstance(shape, VoronoiSite) for shape in individual.shapes
@@ -577,7 +578,11 @@ def render_individual_float(
     config: Config,
     background: int | tuple[int, int, int],
 ) -> np.ndarray:
-    return render_individual_for_scoring(individual, config, background).image
+    result = render_individual_for_scoring(individual, config, background)
+    if result.image is not None:
+        return result.image
+    # Score-only incremental result: materialize the full canvas on demand.
+    return _render_individual_full(individual, config, background)
 
 
 def render_individual(

@@ -32,6 +32,12 @@
 - Optional mutation annealing (`mutation_anneal_iterations`, default 0):
   the per-step mutation rate scales linearly down to a 25% floor across
   the configured iteration span.
+- Score-only fast path for incremental scoring: a mutation's dirty region
+  is scored directly against the pre-mutation render, and the full canvas
+  is materialized lazily — once per breeding lineage, shared across forks —
+  instead of copying the whole raster for every evaluated mutation.
+  Measured numpy throughput improves about 8% at 128×128 and 10% at 256×256
+  with unchanged convergence.
 
 ## 2.4.0 — 2026-10-14
 

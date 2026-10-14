@@ -728,6 +728,77 @@ class RendererTests(unittest.TestCase):
 
         self.assertEqual(tuple(a.point), (3, 3))
 
+    def test_score_only_incremental_render_defers_materialization(self) -> None:
+        reference = np.random.default_rng(7).integers(0, 256, (20, 24, 3), dtype=np.uint8)
+        config = Config(
+            mode="color",
+            shape_mode="mixed",
+            renderer_backend="numpy",
+            compositing_cache_stride=1,
+            prob_structural=0.0,
+            prob_reorder=0.0,
+            prob_mutate_geometry=1.0,
+            min_shapes=1,
+        )
+        background = (110, 120, 130)
+        parent = Individual.random(24, 20, "color", config, 3, rng=random.Random(1))
+        evaluate_fitness(parent, reference, config, background)
+
+        child = parent.fork()
+        child.mutate(config, rate=1.0, rng=random.Random(3))
+
+        probe = child.copy()
+        result = render_individual_for_scoring(probe, config, background)
+        self.assertTrue(result.incremental)
+        self.assertIsNone(result.image)
+        self.assertIsNotNone(result.dirty_region)
+
+        fitness = evaluate_fitness(child, reference, config, background)
+        self.assertIsNone(child._compositing_cache[-1])
+        self.assertIsNotNone(child._pending_region)
+
+        full = child.copy()
+        full.clear_caches()
+        full_config = replace(config, use_dirty_regions=False, use_compositing_cache=False)
+        full_fitness = evaluate_fitness(full, reference, full_config, background)
+        self.assertAlmostEqual(fitness, full_fitness, places=12)
+
+        np.testing.assert_allclose(
+            render_individual_float(child, config, background),
+            render_individual_float(full, full_config, background),
+            atol=1e-6,
+        )
+        self.assertIsNotNone(child._compositing_cache[-1])
+
+    def test_pending_materialization_is_shared_across_forks(self) -> None:
+        reference = np.random.default_rng(7).integers(0, 256, (20, 24, 3), dtype=np.uint8)
+        config = Config(
+            mode="color",
+            shape_mode="mixed",
+            renderer_backend="numpy",
+            compositing_cache_stride=1,
+            prob_structural=0.0,
+            prob_reorder=0.0,
+            prob_mutate_geometry=1.0,
+            min_shapes=1,
+        )
+        background = (110, 120, 130)
+        parent = Individual.random(24, 20, "color", config, 3, rng=random.Random(1))
+        evaluate_fitness(parent, reference, config, background)
+
+        mutant = parent.fork()
+        mutant.mutate(config, rate=1.0, rng=random.Random(3))
+        evaluate_fitness(mutant, reference, config, background)
+
+        first = mutant.fork()
+        second = mutant.fork()
+        first.mutate(config, rate=1.0, rng=random.Random(4))
+        second.mutate(config, rate=1.0, rng=random.Random(5))
+
+        self.assertIsNotNone(first._base_render)
+        self.assertIsNotNone(second._base_render)
+        self.assertIs(first._base_render, second._base_render)
+
     def test_random_shapes_use_size_divisor(self) -> None:
         rng = random.Random(2)
         config = Config(mode="grayscale", new_shape_size_divisor=5.0)

@@ -68,15 +68,15 @@ def evaluate_fitness(
         and result.dirty_bbox is not None
         and result.previous_image is not None
         and result.previous_error_sum is not None
+        and result.dirty_region is not None
     ):
         min_x, min_y, max_x, max_y = result.dirty_bbox
         reference_region = reference[min_y : max_y + 1, min_x : max_x + 1]
         old_region = result.previous_image[min_y : max_y + 1, min_x : max_x + 1]
-        new_region = result.image[min_y : max_y + 1, min_x : max_x + 1]
         error_sum = (
             result.previous_error_sum
             - squared_error_sum(reference_region, old_region)
-            + squared_error_sum(reference_region, new_region)
+            + squared_error_sum(reference_region, result.dirty_region)
         )
         error_sum = max(0.0, error_sum)
     else:

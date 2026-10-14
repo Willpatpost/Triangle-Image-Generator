@@ -741,6 +741,9 @@ class Individual:
     _dirty_bbox: BBox | None = field(default=None, repr=False)
     _base_render: np.ndarray | None = field(default=None, repr=False)
     _base_error_sum: float | None = field(default=None, repr=False)
+    # (dirty bbox, composited region, pre-mutation render, shared materialized
+    # slot); forks share the slot so one lazily materialized canvas serves all.
+    _pending_region: tuple[BBox, np.ndarray, np.ndarray, list] | None = field(default=None, repr=False)
 
     def copy(self) -> Individual:
         return Individual(
@@ -756,6 +759,7 @@ class Individual:
             _dirty_bbox=self._dirty_bbox,
             _base_render=self._base_render,
             _base_error_sum=self._base_error_sum,
+            _pending_region=self._pending_region,
         )
 
     def fork(self) -> Individual:
@@ -769,9 +773,31 @@ class Individual:
             _compositing_cache=list(self._compositing_cache),
             _compositing_cache_signature=self._compositing_cache_signature,
             _pixel_error_sum=self._pixel_error_sum,
+            _pending_region=self._pending_region,
         )
 
     def _cached_final_render(self) -> np.ndarray | None:
+        if self._pending_region is not None:
+            bbox, region, base, materialized = self._pending_region
+            if materialized:
+                canvas = materialized[0]
+            else:
+                canvas = base.copy()
+                min_x, min_y, max_x, max_y = bbox
+                canvas[min_y : max_y + 1, min_x : max_x + 1] = region
+                # The cached final render is handed to callers, so freeze it against mutation.
+                canvas.setflags(write=False)
+                materialized.append(canvas)
+            if len(self._compositing_cache) < len(self.shapes):
+                self._compositing_cache.extend(
+                    [None] * (len(self.shapes) - len(self._compositing_cache))
+                )
+            elif len(self._compositing_cache) > len(self.shapes):
+                del self._compositing_cache[len(self.shapes) :]
+            if self._compositing_cache:
+                self._compositing_cache[-1] = canvas
+            self._pending_region = None
+            return canvas
         if len(self._compositing_cache) != len(self.shapes) or not self._compositing_cache:
             return None
         return self._compositing_cache[-1]
@@ -810,6 +836,7 @@ class Individual:
         self._compositing_cache = []
         self._compositing_cache_signature = None
         self._pixel_error_sum = None
+        self._pending_region = None
         self._clear_dirty_tracking()
         if include_shape_masks:
             for shape in self.shapes:
