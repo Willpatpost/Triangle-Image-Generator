@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- New `elite_candidates` (default 2) and `elite_candidate_rate` (default 0.5)
+  configuration: every generation injects fork-and-mutate candidates of the
+  incumbent best individual, scored through the incremental path and trimmed
+  by rank. On a 225×225 structured target the default improves mean best
+  fitness by about 6% over 5 s and 12% over 15 s versus disabling it, at
+  roughly 8% fewer steps/s; k=4 and full-rate candidates showed no gain.
+  Set `elite_candidates` to 0 to restore the previous behavior.
+- `benchmarks/benchmark.py` accepts `--target` to benchmark against an image
+  file and `--elite-candidates` for candidate sweeps.
+
 ## 2.4.0 — 2026-10-14
 
 - Evolution randomness flows through a per-session RNG instead of the

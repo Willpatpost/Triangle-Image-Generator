@@ -10,7 +10,7 @@ import numpy as np
 
 from core.config import Config, RUNTIME_CONFIG_FIELDS
 from core.fitness import evaluate_fitness, evaluate_population_parallel
-from core.genetic import create_initial_population, hill_climb_elite, next_generation
+from core.genetic import create_initial_population, elite_candidate_batch, hill_climb_elite, next_generation
 from core.guidance import EvolutionGuide
 from core.io import EvolutionState, file_sha256, load_reference_image, read_state, save_state
 from core.renderer import render_individual, render_individual_float
@@ -219,6 +219,18 @@ class EvolutionSession:
             guide=guide,
             rng=self._rng,
         )
+
+        if self.config.elite_candidates > 0:
+            self.population.extend(
+                elite_candidate_batch(
+                    self.global_best,
+                    self.config,
+                    self.mutation_rate,
+                    guide,
+                    rng=self._rng,
+                    count=self.config.elite_candidates,
+                )
+            )
 
         if (
             self.config.hill_climb_interval > 0

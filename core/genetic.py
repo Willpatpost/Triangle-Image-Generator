@@ -37,6 +37,25 @@ def create_initial_population(
     return population
 
 
+def elite_candidate_batch(
+    best: Individual,
+    config: Config,
+    mutation_rate: float,
+    guide: EvolutionGuide | None = None,
+    *,
+    rng: random.Random,
+    count: int,
+) -> list[Individual]:
+    """Fork-and-mutate candidates of the current best individual."""
+    candidates = []
+    for _ in range(count):
+        candidate = best.fork()
+        candidate.mutate(config, rate=mutation_rate * config.elite_candidate_rate, guide=guide, rng=rng)
+        candidate.fitness = float("inf")
+        candidates.append(candidate)
+    return candidates
+
+
 def hill_climb_elite(
     elite: Individual,
     config: Config,

@@ -39,14 +39,29 @@ def main() -> int:
         default="mixed",
     )
     parser.add_argument("--population", type=int, default=24)
+    parser.add_argument(
+        "--elite-candidates",
+        dest="elite_candidates",
+        type=int,
+        default=2,
+        help="best-of-k candidates per generation, mirroring the engine default (0 disables)",
+    )
     parser.add_argument("--seconds", type=float, default=5.0)
     parser.add_argument("--warmup", type=int, default=2, help="untimed steps before measuring")
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument(
+        "--target",
+        default=None,
+        help="image file to approximate instead of the synthetic noise target (width/height ignored)",
+    )
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory() as tmp:
-        target = Path(tmp) / "target.png"
-        build_target(target, args.width, args.height, args.mode, args.seed)
+        if args.target is not None:
+            target = Path(args.target)
+        else:
+            target = Path(tmp) / "target.png"
+            build_target(target, args.width, args.height, args.mode, args.seed)
 
         for name in args.backends.split(","):
             name = name.strip()
@@ -59,6 +74,7 @@ def main() -> int:
                 renderer_backend=name,
                 max_workers=1,
                 enable_logging=False,
+                elite_candidates=args.elite_candidates,
             )
             try:
                 config.validate()

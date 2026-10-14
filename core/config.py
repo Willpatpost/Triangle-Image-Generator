@@ -84,6 +84,8 @@ class Config:
     adaptive_mutation_boost: float = 1.5
     hill_climb_interval: int = 100
     hill_climb_attempts: int = 3
+    elite_candidates: int = 2  # fork-and-mutate candidates of the best individual injected every generation
+    elite_candidate_rate: float = 0.5  # mutation-rate scale applied to elite candidates
 
     # Parallelism
     max_workers: int = 0  # 0 = auto, capped at four cache-preserving threads
@@ -120,6 +122,10 @@ class Config:
             raise ValueError("mutation_rate must be greater than 0")
         if self.mutation_operations < 1:
             raise ValueError("mutation_operations must be at least 1")
+        if self.elite_candidates < 0:
+            raise ValueError("elite_candidates must be 0 or greater")
+        if self.elite_candidate_rate < 0:
+            raise ValueError("elite_candidate_rate must be 0 or greater")
         probabilities = {
             "prob_structural": self.prob_structural,
             "prob_add_vs_del": self.prob_add_vs_del,

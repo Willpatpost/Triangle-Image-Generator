@@ -29,7 +29,7 @@ from core.fitness import (
     normalized_mse,
     shape_penalty,
 )
-from core.genetic import next_generation
+from core.genetic import elite_candidate_batch, next_generation
 from core.guidance import EvolutionGuide
 from core.io import EvolutionState, load_state, read_state, save_state
 from core.pipeline import run_evolution, run_progressive_evolution
@@ -94,6 +94,14 @@ class ConfigTests(unittest.TestCase):
             Config(voronoi_geometry_probability=-0.1).validate()
         with self.assertRaises(ValueError):
             Config(voronoi_color_sigma_scale=-0.5).validate()
+
+    def test_validate_rejects_negative_elite_candidates(self) -> None:
+        with self.assertRaises(ValueError):
+            Config(elite_candidates=-1).validate()
+
+    def test_validate_rejects_negative_elite_candidate_rate(self) -> None:
+        with self.assertRaises(ValueError):
+            Config(elite_candidate_rate=-0.1).validate()
 
 
 class FitnessTests(unittest.TestCase):
@@ -932,6 +940,65 @@ class GeneticTests(unittest.TestCase):
         self.assertEqual(offspring[0].fitness, 0.1)
         self.assertTrue(all(individual.fitness == float("inf") for individual in offspring[1:]))
 
+    def test_elite_candidate_batch_creates_distinct_candidates(self) -> None:
+        config = Config(
+            mode="grayscale",
+            shape_mode="square",
+            prob_structural=0.0,
+            prob_reorder=0.0,
+            prob_mutate_geometry=1.0,
+            nb_elements_initial=2,
+            nb_elements_max=8,
+            min_shapes=1,
+        )
+        parent = Individual.random(8, 8, "grayscale", config, 2, rng=random.Random(1))
+        render_individual(parent, config, 255)
+        snapshots = [shape.top_left.copy() for shape in parent.shapes]
+
+        candidates = elite_candidate_batch(
+            parent,
+            config,
+            mutation_rate=1.0,
+            rng=random.Random(3),
+            count=3,
+        )
+
+        self.assertEqual(len(candidates), 3)
+        for candidate in candidates:
+            self.assertEqual(candidate.fitness, float("inf"))
+            for parent_shape, candidate_shape in zip(parent.shapes, candidate.shapes):
+                self.assertIsNot(candidate_shape, parent_shape)
+        for shape, top_left in zip(parent.shapes, snapshots):
+            np.testing.assert_array_equal(shape.top_left, top_left)
+
+    def test_elite_candidate_rate_zero_freezes_geometry(self) -> None:
+        config = Config(
+            mode="grayscale",
+            shape_mode="square",
+            prob_structural=0.0,
+            prob_reorder=0.0,
+            prob_mutate_geometry=1.0,
+            mutation_sigma_points=40.0,
+            nb_elements_initial=2,
+            nb_elements_max=8,
+            min_shapes=1,
+            elite_candidate_rate=0.0,
+        )
+        parent = Individual.random(8, 8, "grayscale", config, 2, rng=random.Random(1))
+        parent_snapshots = [shape.top_left.copy() for shape in parent.shapes]
+
+        candidates = elite_candidate_batch(parent, config, mutation_rate=1.0, rng=random.Random(3), count=2)
+
+        self.assertEqual(len(candidates), 2)
+        for candidate in candidates:
+            self.assertEqual(candidate.fitness, float("inf"))
+            for index, shape in enumerate(candidate.shapes):
+                np.testing.assert_array_equal(
+                    shape.top_left,
+                    parent_snapshots[index],
+                    err_msg=f"Shape {index} geometry drifted despite elite_candidate_rate=0.0",
+                )
+
 
 class CrossoverTests(unittest.TestCase):
     @staticmethod
@@ -1312,6 +1379,32 @@ class PipelineTests(unittest.TestCase):
                     )
                     session = EvolutionSession(str(image_path), config, _resume_state=state)
                     self.assertEqual(session.iteration, expected_iteration)
+
+    def test_step_injects_and_trims_elite_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "target.png"
+            target = np.zeros((8, 8), dtype=np.uint8)
+            target[2:6, 2:6] = 220
+            Image.fromarray(target, mode="L").save(image_path)
+            config = Config(
+                mode="grayscale",
+                shape_mode="mixed",
+                pop_size=4,
+                nb_elite=1,
+                nb_elements_initial=2,
+                nb_elements_max=8,
+                min_shapes=1,
+                hill_climb_interval=0,
+                max_workers=1,
+                elite_candidates=3,
+            )
+            session = EvolutionSession(str(image_path), config, seed=5)
+
+            with patch("core.evolver.elite_candidate_batch", side_effect=elite_candidate_batch) as spy:
+                session.step()
+
+            self.assertEqual(spy.call_count, 1)
+            self.assertEqual(len(session.population), 4)
 
 
 if __name__ == "__main__":
