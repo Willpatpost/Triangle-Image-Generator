@@ -55,6 +55,15 @@
   at 128×128) because the incremental flow composites small dirty regions
   where numba's per-call thread-launch overhead dominates on many-core
   hosts. The serial shape-major kernels stay.
+- New opt-in batched CUDA evaluation (`cuda_batch_evaluation`, default
+  off): the pending generation is encoded into one CSR-style batch,
+  uploaded once, and rendered and squared-error-scored by a single
+  3D-grid kernel launch with atomic error accumulation, returning only
+  per-individual sums. The host-side orchestration is fully tested; the
+  device kernels mirror the proven per-individual kernels but have never
+  been executed — no CUDA device was available during development.
+  Batched individuals keep no render caches, trading incremental scoring
+  for one launch and one upload per generation.
 
 ## 2.4.0 — 2026-10-14
 

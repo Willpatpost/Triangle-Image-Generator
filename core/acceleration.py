@@ -633,3 +633,205 @@ def render_voronoi_accelerated(
         kernel[blocks, threads](device_canvas, device_geometry, device_colors)
         return device_canvas.copy_to_host()
     raise ValueError("render_voronoi_accelerated requires numba or cuda")
+
+
+@dataclass(frozen=True, slots=True)
+class BatchedShapes:
+    kinds: np.ndarray  # (N,) int8, all individuals concatenated
+    geometry: np.ndarray  # (N, 6) int32
+    colors: np.ndarray  # (N, 3) float32
+    alphas: np.ndarray  # (N,) float32
+    offsets: np.ndarray  # (P+1,) int32; individual p owns rows [offsets[p], offsets[p+1])
+
+
+def encode_population(individuals: list[Individual], config: Config) -> BatchedShapes:
+    """Concatenate per-individual encodings into one CSR-style batch."""
+    encoded = [encode_shapes(individual, config) for individual in individuals]
+    offsets = np.zeros(len(encoded) + 1, dtype=np.int32)
+    if encoded:
+        offsets[1:] = np.cumsum([item.kinds.shape[0] for item in encoded])
+        return BatchedShapes(
+            kinds=np.concatenate([item.kinds for item in encoded]),
+            geometry=np.concatenate([item.geometry for item in encoded]),
+            colors=np.concatenate([item.colors for item in encoded]),
+            alphas=np.concatenate([item.alphas for item in encoded]),
+            offsets=offsets,
+        )
+    return BatchedShapes(
+        kinds=np.zeros(0, dtype=np.int8),
+        geometry=np.zeros((0, 6), dtype=np.int32),
+        colors=np.zeros((0, 3), dtype=np.float32),
+        alphas=np.zeros(0, dtype=np.float32),
+        offsets=offsets,
+    )
+
+
+_CUDA_POPULATION_KERNELS: tuple[object, object] | None = None
+_CUDA_POPULATION_LOCK = threading.Lock()
+
+
+def _load_cuda_population_kernels() -> tuple[object, object]:
+    global _CUDA_POPULATION_KERNELS
+    if _CUDA_POPULATION_KERNELS is not None:
+        return _CUDA_POPULATION_KERNELS
+    with _CUDA_POPULATION_LOCK:
+        if _CUDA_POPULATION_KERNELS is not None:
+            return _CUDA_POPULATION_KERNELS
+        kernels = _build_cuda_population_kernels()
+        _CUDA_POPULATION_KERNELS = kernels
+        return kernels
+
+
+def _build_cuda_population_kernels() -> tuple[object, object]:
+    try:
+        from numba import cuda
+    except Exception as exc:
+        raise AcceleratorUnavailable("Numba CUDA could not be imported") from exc
+
+    @cuda.jit(device=True)
+    def inside(kind, geometry, shape_index, x, y):
+        if kind == 0:
+            x0 = geometry[shape_index, 0]
+            y0 = geometry[shape_index, 1]
+            x1 = geometry[shape_index, 2]
+            y1 = geometry[shape_index, 3]
+            x2 = geometry[shape_index, 4]
+            y2 = geometry[shape_index, 5]
+            area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0)
+            if area == 0:
+                return False
+            edge0 = (x - x0) * (y1 - y0) - (y - y0) * (x1 - x0)
+            edge1 = (x - x1) * (y2 - y1) - (y - y1) * (x2 - x1)
+            edge2 = (x - x2) * (y0 - y2) - (y - y2) * (x0 - x2)
+            return (
+                edge0 >= 0 and edge1 >= 0 and edge2 >= 0
+            ) or (
+                edge0 <= 0 and edge1 <= 0 and edge2 <= 0
+            )
+        if kind == 1:
+            dx = x - geometry[shape_index, 0]
+            dy = y - geometry[shape_index, 1]
+            radius = geometry[shape_index, 2]
+            return dx * dx + dy * dy <= radius * radius
+        if kind == 2:
+            left = geometry[shape_index, 0]
+            top = geometry[shape_index, 1]
+            side = geometry[shape_index, 2]
+            return x >= left and x <= left + side and y >= top and y <= top + side
+        return False
+
+    @cuda.jit
+    def population_gray_kernel(
+        reference, background, kinds, geometry, colors, alphas, offsets, error_sums, width, height
+    ):
+        x, y, individual = cuda.grid(3)
+        if y >= height or x >= width or individual >= offsets.size - 1:
+            return
+        value = np.float32(background)
+        start = offsets[individual]
+        end = offsets[individual + 1]
+        for shape_index in range(start, end):
+            if inside(kinds[shape_index], geometry, shape_index, x, y):
+                alpha = alphas[shape_index]
+                if alpha >= 1.0:
+                    value = colors[shape_index, 0]
+                elif alpha > 0.0:
+                    inverse_alpha = np.float32(1.0) - alpha
+                    value = value * inverse_alpha + alpha * colors[shape_index, 0]
+        delta = np.float64(value - reference[y, x])
+        cuda.atomic.add(error_sums, individual, delta * delta)
+
+    @cuda.jit
+    def population_color_kernel(
+        reference, bg_red, bg_green, bg_blue, kinds, geometry, colors, alphas, offsets,
+        error_sums, width, height,
+    ):
+        x, y, individual = cuda.grid(3)
+        if y >= height or x >= width or individual >= offsets.size - 1:
+            return
+        red = np.float32(bg_red)
+        green = np.float32(bg_green)
+        blue = np.float32(bg_blue)
+        start = offsets[individual]
+        end = offsets[individual + 1]
+        for shape_index in range(start, end):
+            if inside(kinds[shape_index], geometry, shape_index, x, y):
+                alpha = alphas[shape_index]
+                if alpha >= 1.0:
+                    red = colors[shape_index, 0]
+                    green = colors[shape_index, 1]
+                    blue = colors[shape_index, 2]
+                elif alpha > 0.0:
+                    inverse_alpha = np.float32(1.0) - alpha
+                    red = red * inverse_alpha + alpha * colors[shape_index, 0]
+                    green = green * inverse_alpha + alpha * colors[shape_index, 1]
+                    blue = blue * inverse_alpha + alpha * colors[shape_index, 2]
+        d0 = np.float64(red - reference[y, x, 0])
+        d1 = np.float64(green - reference[y, x, 1])
+        d2 = np.float64(blue - reference[y, x, 2])
+        cuda.atomic.add(error_sums, individual, d0 * d0 + d1 * d1 + d2 * d2)
+
+    return (population_gray_kernel, population_color_kernel)
+
+
+def evaluate_population_cuda(
+    individuals: list[Individual],
+    reference: np.ndarray,
+    background: int | tuple[int, int, int],
+    config: Config,
+) -> np.ndarray:
+    """Render and score whole individuals on device in one batch.
+
+    Returns one float64 squared-error sum per individual. The kernels mirror
+    the proven per-individual CUDA kernels but have never been executed —
+    no CUDA device was available during development.
+    """
+    from numba import cuda
+
+    batched = encode_population(individuals, config)
+    height, width = reference.shape[:2]
+    device_reference = cuda.to_device(np.ascontiguousarray(reference))
+    device_kinds = cuda.to_device(batched.kinds)
+    device_geometry = cuda.to_device(batched.geometry)
+    device_colors = cuda.to_device(batched.colors)
+    device_alphas = cuda.to_device(batched.alphas)
+    device_offsets = cuda.to_device(batched.offsets)
+    device_error = cuda.to_device(np.zeros(len(individuals), dtype=np.float64))
+
+    gray_kernel, color_kernel = _load_cuda_population_kernels()
+    threads = (16, 16)
+    blocks = (
+        (width + threads[0] - 1) // threads[0],
+        (height + threads[1] - 1) // threads[1],
+        len(individuals),
+    )
+    if reference.ndim == 2:
+        gray_kernel[blocks, threads](
+            device_reference,
+            float(background),
+            device_kinds,
+            device_geometry,
+            device_colors,
+            device_alphas,
+            device_offsets,
+            device_error,
+            width,
+            height,
+        )
+    else:
+        red, green, blue = (float(value) for value in background)
+        color_kernel[blocks, threads](
+            device_reference,
+            red,
+            green,
+            blue,
+            device_kinds,
+            device_geometry,
+            device_colors,
+            device_alphas,
+            device_offsets,
+            device_error,
+            width,
+            height,
+        )
+    return device_error.copy_to_host()

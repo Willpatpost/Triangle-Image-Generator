@@ -135,6 +135,31 @@ def evaluate_population_parallel(
     backend = resolve_renderer_backend(config.renderer_backend, reference.size, config)
     if backend == "cuda":
         workers = 1
+        if config.cuda_batch_evaluation and len(pending) >= 2:
+            # One batched device evaluation for the whole pending generation;
+            # batching a single individual saves nothing. Batched individuals
+            # keep no render caches, so their next mutation re-renders in full —
+            # the trade for one kernel launch and one upload per generation.
+            from core.acceleration import evaluate_population_cuda
+
+            error_sums = evaluate_population_cuda(
+                [individual for _, individual in pending],
+                reference,
+                background,
+                config,
+            )
+            for (index, individual), error_sum in zip(pending, error_sums):
+                individual._pixel_error_sum = float(error_sum)
+                normalized = float(error_sum) / (reference.size * 255.0**2)
+                individual.fitness = normalized + shape_penalty(len(individual.shapes), config)
+                tracker.consider(index)
+
+            ranked = sorted(
+                ((i, ind.fitness) for i, ind in enumerate(population)),
+                key=lambda item: item[1],
+            )
+            tracker.finalize(ranked)
+            return ranked
     work_size = reference.size
     parallel_threshold = config.parallel_min_pixels
     if config.shape_mode == "voronoi":

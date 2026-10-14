@@ -18,6 +18,7 @@ RUNTIME_CONFIG_FIELDS = frozenset(
         "use_dirty_regions",
         "numba_min_pixels",
         "cuda_min_pixels",
+        "cuda_batch_evaluation",
         "use_compositing_cache",
         "compositing_cache_stride",
         "compositing_cache_max_mb",
@@ -81,6 +82,10 @@ class Config:
     use_dirty_regions: bool = True
     numba_min_pixels: int = 4_096
     cuda_min_pixels: int = 262_144
+    # Batched device evaluation for CUDA: one launch and one upload per
+    # pending generation instead of per-individual transfers. Opt-in and
+    # unmeasured (no CUDA device available during development).
+    cuda_batch_evaluation: bool = False
     use_compositing_cache: bool = True
     compositing_cache_stride: int = 8
     compositing_cache_max_mb: float = 32.0

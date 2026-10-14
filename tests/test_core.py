@@ -17,6 +17,7 @@ from core.acceleration import (
     _render_color_impl,
     acceleration_status,
     available_renderer_backends,
+    encode_population,
     encode_shapes,
     resolve_renderer_backend,
 )
@@ -274,6 +275,55 @@ class FitnessTests(unittest.TestCase):
         )
         self.assertAlmostEqual(removed_fitness, removed_full_fitness, places=12)
 
+    def test_cuda_batch_evaluation_scores_pending_generation(self) -> None:
+        config = Config(
+            mode="grayscale",
+            shape_mode="square",
+            pop_size=4,
+            nb_elite=1,
+            renderer_backend="cuda",
+            cuda_batch_evaluation=True,
+            parallel_min_pixels=1,
+        )
+        population = [
+            Individual(
+                width=2,
+                height=2,
+                mode="grayscale",
+                shapes=[
+                    Square(
+                        top_left=np.array([0, 0], dtype=np.int32),
+                        side=1,
+                        color=50 + index,
+                        alpha=255,
+                    )
+                ],
+                fitness=0.5 if index == 0 else float("inf"),
+            )
+            for index in range(4)
+        ]
+        reference = np.zeros((2, 2), dtype=np.uint8)
+
+        def fake_batch(individuals, reference, background, config):
+            sums = []
+            for individual in individuals:
+                color = individual.shapes[0].color
+                sums.append(3 * float(background) ** 2 + float(color) ** 2)
+            return np.array(sums, dtype=np.float64)
+
+        with (
+            patch("core.acceleration.resolve_renderer_backend", return_value="cuda"),
+            patch("core.acceleration.evaluate_population_cuda", side_effect=fake_batch) as spy,
+        ):
+            ranked = evaluate_population_parallel(population, reference, config, 0, 1)
+
+        self.assertEqual(spy.call_count, 1)
+        self.assertEqual(len(ranked), 4)
+        self.assertEqual(ranked[0][0], 1)
+        self.assertAlmostEqual(population[1].fitness, 0.01, places=12)
+        self.assertEqual(population[0].fitness, 0.5)
+        self.assertIsNotNone(population[1]._pixel_error_sum)
+
 
 class AccelerationTests(unittest.TestCase):
     @staticmethod
@@ -366,6 +416,27 @@ class AccelerationTests(unittest.TestCase):
 
         other = encode_shapes(individual, replace(config, fixed_alpha=0.5))
         self.assertIsNot(other, third)
+
+    def test_encode_population_batches_offsets(self) -> None:
+        config = Config(mode="grayscale", shape_mode="square")
+        individuals = [
+            Individual.random(16, 16, "grayscale", config, count, rng=random.Random(seed))
+            for seed, count in ((1, 2), (2, 3), (3, 1))
+        ]
+
+        batched = encode_population(individuals, config)
+
+        self.assertEqual(batched.offsets.tolist(), [0, 2, 5, 6])
+        self.assertEqual(batched.kinds.shape, (6,))
+        self.assertEqual(batched.geometry.shape, (6, 6))
+        solo = encode_shapes(individuals[1], config)
+        np.testing.assert_array_equal(batched.geometry[2:5], solo.geometry)
+        np.testing.assert_array_equal(batched.colors[2:5], solo.colors)
+        np.testing.assert_array_equal(batched.alphas[2:5], solo.alphas)
+
+        empty = encode_population([], config)
+        self.assertEqual(empty.offsets.tolist(), [0])
+        self.assertEqual(empty.kinds.shape, (0,))
 
     def test_numba_loop_body_matches_numpy_renderer(self) -> None:
         individual = self._sample_individual()
