@@ -64,6 +64,10 @@
   been executed — no CUDA device was available during development.
   Batched individuals keep no render caches, trading incremental scoring
   for one launch and one upload per generation.
+- Dead-code sweep: removed the orphaned `log_level` config knob (unused
+  since `setup_logging` was dropped; sessions that saved it still load),
+  the never-called `Config.elite_fraction()` and `render_voronoi()`
+  helpers, and covered the previously untested worker resume branch.
 
 ## 2.4.0 — 2026-10-14
 

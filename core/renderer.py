@@ -272,14 +272,6 @@ def render_voronoi_float(
     return canvas
 
 
-def render_voronoi(
-    individual: Individual,
-    background: int | tuple[int, int, int],
-) -> np.ndarray:
-    rendered = np.clip(render_voronoi_float(individual, background), 0, 255)
-    return np.rint(rendered).astype(np.uint8)
-
-
 def _render_cache_signature(
     individual: Individual,
     config: Config,

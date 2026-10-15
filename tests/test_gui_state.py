@@ -186,6 +186,25 @@ class ControllerTests(unittest.TestCase):
         self.assertIsNone(controller.resume_path)
         self.assertEqual(stub.batches, 2)
 
+    def test_worker_resume_branch_uses_the_factory(self) -> None:
+        controller = EvolutionController()
+        stub = StubSession(controller.stop_event, stop_after_batches=1)
+        run_id = controller.begin_run()
+
+        controller.run_worker(
+            run_id,
+            _settings(),
+            None,
+            None,
+            Path("session.json"),
+            session_factory=StubFactory(stub),
+        )
+        messages = controller.drain()
+
+        self.assertIsInstance(messages[0], WorkerSessionReady)
+        self.assertIs(controller.session, stub)
+        self.assertFalse(messages[-1].failed)
+
     def test_stale_run_messages_are_dropped(self) -> None:
         controller = EvolutionController()
         controller.run_id = 7

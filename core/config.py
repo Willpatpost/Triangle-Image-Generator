@@ -11,7 +11,6 @@ RUNTIME_CONFIG_FIELDS = frozenset(
     {
         "enable_logging",
         "log_interval_sec",
-        "log_level",
         "max_workers",
         "parallel_min_pixels",
         "renderer_backend",
@@ -112,7 +111,6 @@ class Config:
     # Logging
     enable_logging: bool = True
     log_interval_sec: float = 10.0
-    log_level: str = "INFO"
 
     # Runtime (set during execution)
     background: int | tuple[int, int, int] = field(default=255, repr=False)
@@ -209,6 +207,3 @@ class Config:
             raise ValueError("adaptive_mutation_boost must be at least 1.0")
         if self.hill_climb_interval < 0 or self.hill_climb_attempts < 0:
             raise ValueError("hill climb settings must be non-negative")
-
-    def elite_fraction(self) -> float:
-        return self.nb_elite / max(self.pop_size, 1)
